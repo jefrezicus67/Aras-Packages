@@ -1,6 +1,6 @@
-// ES5-Compatible: Convert Text(s) to List
+// ES5-Compatible: Convert Text(s) to List - WITH UNDO TRACKING SUSPENSION
 (function() {
-    var viewmodel = window.viewController.viewContext.data.structuredDocument;
+    var viewmodel = window.viewContext.controls.editorControl.actionsHelper.viewmodel;
     
     function convertTextsToList() {
         var selectedItems = viewmodel.GetSelectedItems();
@@ -40,87 +40,98 @@
         console.log("Parent:", parent.nodeName);
         console.log("Insert position:", insertPosition);
         
-        // Create List element (comes with one default List-Item)
-        var listElement = viewmodel.CreateElement('element', { type: 'List' });
+        // CRITICAL: Suspend invalidation and change tracking during the operation
+        console.log("Suspending change tracking...");
+        viewmodel.SuspendInvalidation();
         
-        if (!listElement) {
-            console.error("❌ Failed to create List element");
-            return false;
-        }
-        
-        // Get the default List-Item
-        var defaultListItem = listElement.ChildItems().get(0);
-        
-        // Process each Text element and populate List-Items
-        for (var i = 0; i < textElements.length; i++) {
-            var textElement = textElements[i];
-            var textContent = textElement.GetTextAsString();
+        try {
+            // Create List element (comes with one default List-Item)
+            var listElement = viewmodel.CreateElement('element', { type: 'List' });
             
-            console.log("Processing Text " + i + ": \"" + textContent + "\"");
-            
-            var listItem;
-            
-            if (i === 0) {
-                // Use the default List-Item for the first text
-                listItem = defaultListItem;
-            } else {
-                // Clone the default List-Item for additional items
-                listItem = defaultListItem.Clone();
+            if (!listElement) {
+                console.error("❌ Failed to create List element");
+                return false;
             }
             
-            // Get or create the Text element inside the List-Item
-            var listItemText = listItem.ChildItems().get(0);
+            // Get the default List-Item
+            var defaultListItem = listElement.ChildItems().get(0);
             
-            if (!listItemText || listItemText.nodeName !== 'Text') {
-                listItemText = viewmodel.CreateElement('element', { type: 'Text' });
-                listItem.ChildItems().insertAt(0, listItemText);
-            }
-            
-            // Set text content
-            if (textContent && listItemText) {
-                var textOrigin = listItemText.origin;
+            // Process each Text element and populate List-Items
+            for (var i = 0; i < textElements.length; i++) {
+                var textElement = textElements[i];
+                var textContent = textElement.GetTextAsString();
                 
-                // Clear existing content
-                while (textOrigin.firstChild) {
-                    textOrigin.removeChild(textOrigin.firstChild);
+                console.log("Processing Text " + i + ": \"" + textContent + "\"");
+                
+                var listItem;
+                
+                if (i === 0) {
+                    // Use the default List-Item for the first text
+                    listItem = defaultListItem;
+                } else {
+                    // Clone the default List-Item for additional items
+                    listItem = defaultListItem.Clone();
                 }
                 
-                var ownerDoc = textOrigin.ownerDocument;
-                var arasNS = 'http://aras.com/ArasTechDoc';
-                var emph = ownerDoc.createElementNS(arasNS, 'aras:emph');
-                emph.setAttribute('emphtype', 'text');
-                emph.setAttribute('xmlns', '');
-                emph.text = textContent;
+                // Get or create the Text element inside the List-Item
+                var listItemText = listItem.ChildItems().get(0);
                 
-                textOrigin.appendChild(emph);
-                listItemText.parseOrigin();
+                if (!listItemText || listItemText.nodeName !== 'Text') {
+                    listItemText = viewmodel.CreateElement('element', { type: 'Text' });
+                    listItem.ChildItems().insertAt(0, listItemText);
+                }
                 
-                console.log("  Set text: \"" + textContent + "\"");
+                // Set text content
+                if (textContent && listItemText) {
+                    var textOrigin = listItemText.origin;
+                    
+                    // Clear existing content
+                    while (textOrigin.firstChild) {
+                        textOrigin.removeChild(textOrigin.firstChild);
+                    }
+                    
+                    var ownerDoc = textOrigin.ownerDocument;
+                    var arasNS = 'http://aras.com/ArasTechDoc';
+                    var emph = ownerDoc.createElementNS(arasNS, 'aras:emph');
+                    emph.setAttribute('emphtype', 'text');
+                    emph.setAttribute('xmlns', '');
+                    emph.text = textContent;
+                    
+                    textOrigin.appendChild(emph);
+                    listItemText.parseOrigin();
+                    
+                    console.log("  Set text: \"" + textContent + "\"");
+                }
+                
+                // Add List-Item to List (skip first one as it's already there)
+                if (i > 0) {
+                    listElement.ChildItems().insertAt(i, listItem);
+                }
             }
             
-            // Add List-Item to List (skip first one as it's already there)
-            if (i > 0) {
-                listElement.ChildItems().insertAt(i, listItem);
+            // Remove the original Text elements AFTER we've processed them all
+            for (var i = 0; i < textElements.length; i++) {
+                var textElement = textElements[i];
+                var textParent = textElement.Parent;
+                var textChildList = textParent.ChildItems();
+                var textPosition = textChildList.index(textElement);
+                textChildList.splice(textPosition, 1);
             }
+            
+            // Insert the List at the saved position
+            childList.insertAt(insertPosition, listElement);
+            
+            // Select the new List element
+            viewmodel.SetSelectedItems([listElement]);
+            
+        } finally {
+            // CRITICAL: Always resume invalidation, even if there's an error
+            console.log("Resuming change tracking...");
+            viewmodel.ResumeInvalidation();
+            
+            // Manually invalidate the parent to update the UI
+            viewmodel.invalidateElement(parent);
         }
-        
-        // Remove the original Text elements AFTER we've processed them all
-        for (var i = 0; i < textElements.length; i++) {
-            var textElement = textElements[i];
-            var textParent = textElement.Parent;
-            var textChildList = textParent.ChildItems();
-            var textPosition = textChildList.index(textElement);
-            textChildList.splice(textPosition, 1);
-        }
-        
-        // Insert the List at the saved position
-        childList.insertAt(insertPosition, listElement);
-        
-        // Select the new List element
-        viewmodel.SetSelectedItems([listElement]);
-        
-        // Invalidate the element to update the UI
-        viewmodel.invalidateElement(listElement);
         
         console.log("✅ Successfully converted Text elements to List");
         return true;
