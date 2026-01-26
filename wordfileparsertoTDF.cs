@@ -31,16 +31,16 @@
         string filePath = fileItem.getProperty("checkedout_path", "");
         
         // Try to get vault path - use the one that works for your Aras version
-        //string vaultPath = Aras.Server.Core.ServerContext.VaultServerURL;
-        string vaultPath = "";
         /*
-        string vaultPath = inItem.getInnovator().getProperty("VaultServerURL", "");
+        string vaultPath = inn.getProperty("VaultServerURL", "");
         if (string.IsNullOrEmpty(vaultPath))
         {
             // Fallback: try to construct from database connection info
             vaultPath = this.getInnovator().getConnection().GetDatabaseProperty("VaultServerURL", "");
         }
         */
+
+        string vaultPath = "";
 
         string fullPath = System.IO.Path.Combine(vaultPath, filePath);
         
@@ -148,7 +148,7 @@ private string ParseWordDocumentUsingReflection(string filePath, Item inItem)
                     lastNumId = null;
                 }
                 
-                ProcessTableReflection(element, tdfContent);
+                ProcessTableReflection(element, tdfContent, mainPart, inItem);
             }
         }
         
@@ -171,6 +171,485 @@ private string ParseWordDocumentUsingReflection(string filePath, Item inItem)
     }
     
     return WrapInTDFStructure(tdfContent.ToString());
+}
+
+// Table-related classes for structured data
+private class TableStructure
+{
+    public int RowCount { get; set; }
+    public int ColumnCount { get; set; }
+    public bool HasHeaderRow { get; set; }
+    public System.Collections.Generic.List<System.Collections.Generic.List<CellData>> Rows { get; set; }
+    
+    public TableStructure()
+    {
+        Rows = new System.Collections.Generic.List<System.Collections.Generic.List<CellData>>();
+    }
+}
+
+private class CellData
+{
+    public string Text { get; set; }
+    public int RowSpan { get; set; }
+    public int ColumnSpan { get; set; }
+    public bool IsHeader { get; set; }
+    public string VerticalAlignment { get; set; }
+    public string HorizontalAlignment { get; set; }
+    public System.Collections.Generic.List<string> ImageFileIds { get; set; }
+    
+    public CellData()
+    {
+        Text = "";
+        RowSpan = 1;
+        ColumnSpan = 1;
+        IsHeader = false;
+        ImageFileIds = new System.Collections.Generic.List<string>();
+    }
+}
+
+private void ProcessTableReflection(object table, System.Text.StringBuilder tdfContent, object mainPart, Item inItem)
+{
+    // First, analyze the table structure
+    TableStructure tableStructure = AnalyzeTableStructure(table, mainPart, inItem);
+    
+    // Determine if table has a title (caption before table)
+    string tableTitle = ""; // Could be enhanced to look for a caption paragraph before the table
+    
+    // Start Table element with proper TDF structure
+    tdfContent.AppendFormat("<Table xmlns:aras=\"http://aras.com/ArasTechDoc\" aras:id=\"{0}\"", GenerateGuid());
+    
+    // Add table attributes based on structure
+    if (tableStructure.ColumnCount > 0)
+    {
+        tdfContent.AppendFormat(" cols=\"{0}\"", tableStructure.ColumnCount);
+    }
+    
+    tdfContent.Append(">");
+    
+    // Add table title if present
+    if (!string.IsNullOrEmpty(tableTitle))
+    {
+        tdfContent.AppendFormat("<Title aras:id=\"{0}\"><aras:emph emphtype=\"text\">{1}</aras:emph></Title>", 
+            GenerateGuid(), EscapeXml(tableTitle));
+    }
+    
+    // Add TGroup (table group) - required for complex tables
+    tdfContent.AppendFormat("<TGroup aras:id=\"{0}\" cols=\"{1}\">", 
+        GenerateGuid(), tableStructure.ColumnCount);
+    
+    // Add column specifications
+    for (int i = 0; i < tableStructure.ColumnCount; i++)
+    {
+        tdfContent.AppendFormat("<ColSpec aras:id=\"{0}\" colnum=\"{1}\" colname=\"col{1}\" />", 
+            GenerateGuid(), i + 1);
+    }
+    
+    // Process header rows if present
+    if (tableStructure.HasHeaderRow && tableStructure.Rows.Count > 0)
+    {
+        tdfContent.AppendFormat("<THead aras:id=\"{0}\">", GenerateGuid());
+        ProcessTableRow(tableStructure.Rows[0], tdfContent, true);
+        tdfContent.Append("</THead>");
+        
+        // Process body rows
+        if (tableStructure.Rows.Count > 1)
+        {
+            tdfContent.AppendFormat("<TBody aras:id=\"{0}\">", GenerateGuid());
+            for (int i = 1; i < tableStructure.Rows.Count; i++)
+            {
+                ProcessTableRow(tableStructure.Rows[i], tdfContent, false);
+            }
+            tdfContent.Append("</TBody>");
+        }
+    }
+    else
+    {
+        // All rows are body rows
+        tdfContent.AppendFormat("<TBody aras:id=\"{0}\">", GenerateGuid());
+        foreach (System.Collections.Generic.List<CellData> row in tableStructure.Rows)
+        {
+            ProcessTableRow(row, tdfContent, false);
+        }
+        tdfContent.Append("</TBody>");
+    }
+    
+    tdfContent.Append("</TGroup>");
+    tdfContent.Append("</Table>");
+}
+
+private TableStructure AnalyzeTableStructure(object table, object mainPart, Item inItem)
+{
+    TableStructure structure = new TableStructure();
+    
+    // Get TableRow elements
+    System.Type tableType = table.GetType();
+    System.Reflection.MethodInfo elementsMethod = null;
+    
+    foreach (System.Reflection.MethodInfo method in tableType.GetMethods())
+    {
+        if (method.Name == "Elements" && method.IsGenericMethod)
+        {
+            elementsMethod = method;
+            break;
+        }
+    }
+    
+    if (elementsMethod != null)
+    {
+        System.Type rowType = tableType.Assembly.GetType("DocumentFormat.OpenXml.Wordprocessing.TableRow");
+        System.Reflection.MethodInfo genericElements = elementsMethod.MakeGenericMethod(rowType);
+        System.Collections.IEnumerable rows = (System.Collections.IEnumerable)genericElements.Invoke(table, null);
+        
+        int maxColumns = 0;
+        bool firstRow = true;
+        
+        foreach (object row in rows)
+        {
+            System.Collections.Generic.List<CellData> rowData = new System.Collections.Generic.List<CellData>();
+            
+            // Get cells in this row
+            System.Type cellType = tableType.Assembly.GetType("DocumentFormat.OpenXml.Wordprocessing.TableCell");
+            System.Reflection.MethodInfo cellElements = elementsMethod.MakeGenericMethod(cellType);
+            System.Collections.IEnumerable cells = (System.Collections.IEnumerable)cellElements.Invoke(row, null);
+            
+            int columnCount = 0;
+            foreach (object cell in cells)
+            {
+                CellData cellData = ExtractCellData(cell, mainPart, inItem);
+                
+                // Check if first row cells are headers
+                if (firstRow)
+                {
+                    cellData.IsHeader = IsCellHeader(cell);
+                    if (cellData.IsHeader)
+                    {
+                        structure.HasHeaderRow = true;
+                    }
+                }
+                
+                rowData.Add(cellData);
+                columnCount += cellData.ColumnSpan;
+            }
+            
+            if (columnCount > maxColumns)
+            {
+                maxColumns = columnCount;
+            }
+            
+            structure.Rows.Add(rowData);
+            firstRow = false;
+        }
+        
+        structure.RowCount = structure.Rows.Count;
+        structure.ColumnCount = maxColumns;
+    }
+    
+    return structure;
+}
+
+private CellData ExtractCellData(object cell, object mainPart, Item inItem)
+{
+    CellData cellData = new CellData();
+    
+    // Get cell properties for spans and alignment
+    try
+    {
+        System.Reflection.PropertyInfo propsProp = cell.GetType().GetProperty("TableCellProperties");
+        object props = propsProp.GetValue(cell, null);
+        
+        if (props != null)
+        {
+            // Get GridSpan (column span)
+            System.Reflection.PropertyInfo gridSpanProp = props.GetType().GetProperty("GridSpan");
+            if (gridSpanProp != null)
+            {
+                object gridSpan = gridSpanProp.GetValue(props, null);
+                if (gridSpan != null)
+                {
+                    System.Reflection.PropertyInfo valProp = gridSpan.GetType().GetProperty("Val");
+                    if (valProp != null)
+                    {
+                        object val = valProp.GetValue(gridSpan, null);
+                        if (val != null)
+                        {
+                            int spanValue;
+                            if (int.TryParse(val.ToString(), out spanValue))
+                            {
+                                cellData.ColumnSpan = spanValue;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Get VerticalMerge (row span) - this is more complex
+            System.Reflection.PropertyInfo vMergeProp = props.GetType().GetProperty("VerticalMerge");
+            if (vMergeProp != null)
+            {
+                object vMerge = vMergeProp.GetValue(props, null);
+                if (vMerge != null)
+                {
+                    // Note: Full row span calculation requires tracking across rows
+                    // For now, we'll mark it but not calculate the exact span
+                    cellData.RowSpan = 1; // Would need multi-pass to calculate properly
+                }
+            }
+            
+            // Get vertical alignment
+            System.Reflection.PropertyInfo vAlignProp = props.GetType().GetProperty("TableCellVerticalAlignment");
+            if (vAlignProp != null)
+            {
+                object vAlign = vAlignProp.GetValue(props, null);
+                if (vAlign != null)
+                {
+                    System.Reflection.PropertyInfo valProp = vAlign.GetType().GetProperty("Val");
+                    if (valProp != null)
+                    {
+                        object val = valProp.GetValue(vAlign, null);
+                        if (val != null)
+                        {
+                            cellData.VerticalAlignment = val.ToString();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    catch
+    {
+        // Continue with defaults
+    }
+    
+    // Extract text content from paragraphs
+    System.Text.StringBuilder cellText = new System.Text.StringBuilder();
+    
+    System.Reflection.MethodInfo elementsMethod = null;
+    foreach (System.Reflection.MethodInfo method in cell.GetType().GetMethods())
+    {
+        if (method.Name == "Elements" && method.IsGenericMethod)
+        {
+            elementsMethod = method;
+            break;
+        }
+    }
+    
+    if (elementsMethod != null)
+    {
+        System.Type paraType = cell.GetType().Assembly.GetType("DocumentFormat.OpenXml.Wordprocessing.Paragraph");
+        System.Reflection.MethodInfo genericElements = elementsMethod.MakeGenericMethod(paraType);
+        System.Collections.IEnumerable paras = (System.Collections.IEnumerable)genericElements.Invoke(cell, null);
+        
+        bool firstPara = true;
+        foreach (object para in paras)
+        {
+            if (!firstPara)
+            {
+                cellText.Append("\n"); // Preserve paragraph breaks within cell
+            }
+            
+            // Get text
+            string paraText = GetParagraphTextReflection(para);
+            cellText.Append(paraText);
+            
+            // Check for images in paragraph
+            string imageIds = ProcessImagesInParagraphForCell(para, mainPart, inItem);
+            if (!string.IsNullOrEmpty(imageIds))
+            {
+                // Split multiple image IDs if present
+                string[] ids = imageIds.Split(',');
+                foreach (string id in ids)
+                {
+                    if (!string.IsNullOrEmpty(id.Trim()))
+                    {
+                        cellData.ImageFileIds.Add(id.Trim());
+                    }
+                }
+            }
+            
+            firstPara = false;
+        }
+    }
+    
+    cellData.Text = cellText.ToString().Trim();
+    
+    return cellData;
+}
+
+private bool IsCellHeader(object cell)
+{
+    try
+    {
+        // Check if cell has specific styling that indicates header
+        System.Reflection.MethodInfo elementsMethod = null;
+        foreach (System.Reflection.MethodInfo method in cell.GetType().GetMethods())
+        {
+            if (method.Name == "Elements" && method.IsGenericMethod)
+            {
+                elementsMethod = method;
+                break;
+            }
+        }
+        
+        if (elementsMethod != null)
+        {
+            System.Type paraType = cell.GetType().Assembly.GetType("DocumentFormat.OpenXml.Wordprocessing.Paragraph");
+            System.Reflection.MethodInfo genericElements = elementsMethod.MakeGenericMethod(paraType);
+            System.Collections.IEnumerable paras = (System.Collections.IEnumerable)genericElements.Invoke(cell, null);
+            
+            foreach (object para in paras)
+            {
+                // Check for bold formatting in runs
+                System.Reflection.MethodInfo runElementsMethod = elementsMethod;
+                System.Type runType = para.GetType().Assembly.GetType("DocumentFormat.OpenXml.Wordprocessing.Run");
+                System.Reflection.MethodInfo genericRunElements = runElementsMethod.MakeGenericMethod(runType);
+                System.Collections.IEnumerable runs = (System.Collections.IEnumerable)genericRunElements.Invoke(para, null);
+                
+                foreach (object run in runs)
+                {
+                    System.Reflection.PropertyInfo runPropsProp = run.GetType().GetProperty("RunProperties");
+                    if (runPropsProp != null)
+                    {
+                        object runProps = runPropsProp.GetValue(run, null);
+                        if (runProps != null)
+                        {
+                            // Check for Bold property
+                            System.Reflection.PropertyInfo boldProp = runProps.GetType().GetProperty("Bold");
+                            if (boldProp != null)
+                            {
+                                object bold = boldProp.GetValue(runProps, null);
+                                if (bold != null)
+                                {
+                                    return true; // Has bold formatting, likely a header
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    catch
+    {
+        // Continue
+    }
+    
+    return false;
+}
+
+private void ProcessTableRow(System.Collections.Generic.List<CellData> rowData, System.Text.StringBuilder tdfContent, bool isHeader)
+{
+    tdfContent.AppendFormat("<Row aras:id=\"{0}\">", GenerateGuid());
+    
+    foreach (CellData cellData in rowData)
+    {
+        // Start Entry element
+        tdfContent.AppendFormat("<Entry aras:id=\"{0}\"", GenerateGuid());
+        
+        // Add column span if > 1
+        if (cellData.ColumnSpan > 1)
+        {
+            tdfContent.AppendFormat(" namest=\"col1\" nameend=\"col{0}\"", cellData.ColumnSpan);
+        }
+        
+        // Add row span if > 1 (morerows = rowspan - 1)
+        if (cellData.RowSpan > 1)
+        {
+            tdfContent.AppendFormat(" morerows=\"{0}\"", cellData.RowSpan - 1);
+        }
+        
+        // Add vertical alignment
+        if (!string.IsNullOrEmpty(cellData.VerticalAlignment))
+        {
+            string valign = "middle"; // default
+            if (cellData.VerticalAlignment.ToLower().Contains("top"))
+                valign = "top";
+            else if (cellData.VerticalAlignment.ToLower().Contains("bottom"))
+                valign = "bottom";
+            
+            tdfContent.AppendFormat(" valign=\"{0}\"", valign);
+        }
+        
+        tdfContent.Append(">");
+        
+        // Add text content
+        if (!string.IsNullOrEmpty(cellData.Text))
+        {
+            // Check if text contains line breaks
+            if (cellData.Text.Contains("\n"))
+            {
+                // Multiple paragraphs - wrap each in Para element
+                string[] paragraphs = cellData.Text.Split('\n');
+                foreach (string para in paragraphs)
+                {
+                    if (!string.IsNullOrWhiteSpace(para))
+                    {
+                        tdfContent.AppendFormat("<Para aras:id=\"{0}\"><aras:emph xmlns=\"\" emphtype=\"text\">{1}</aras:emph></Para>", 
+                            GenerateGuid(), EscapeXml(para.Trim()));
+                    }
+                }
+            }
+            else
+            {
+                // Single paragraph
+                tdfContent.AppendFormat("<aras:emph xmlns=\"\" emphtype=\"text\">{0}</aras:emph>", 
+                    EscapeXml(cellData.Text));
+            }
+        }
+        
+        // Add images if present
+        foreach (string imageFileId in cellData.ImageFileIds)
+        {
+            tdfContent.AppendFormat("<Figure xmlns:aras=\"http://aras.com/ArasTechDoc\" aras:id=\"{0}\" fileId=\"{1}\"><Caption aras:id=\"{2}\"><aras:emph emphtype=\"text\">Image</aras:emph></Caption></Figure>", 
+                GenerateGuid(), imageFileId, GenerateGuid());
+        }
+        
+        tdfContent.Append("</Entry>");
+    }
+    
+    tdfContent.Append("</Row>");
+}
+
+private string ProcessImagesInParagraphForCell(object para, object mainPart, Item inItem)
+{
+    System.Collections.Generic.List<string> imageIds = new System.Collections.Generic.List<string>();
+    
+    try
+    {
+        // Get all descendants to find Drawing elements
+        System.Reflection.MethodInfo descendantsMethod = null;
+        foreach (System.Reflection.MethodInfo method in para.GetType().GetMethods())
+        {
+            if (method.Name == "Descendants" && method.IsGenericMethod)
+            {
+                descendantsMethod = method;
+                break;
+            }
+        }
+        
+        if (descendantsMethod != null)
+        {
+            // Get Drawing type
+            System.Type drawingType = para.GetType().Assembly.GetType("DocumentFormat.OpenXml.Wordprocessing.Drawing");
+            System.Reflection.MethodInfo genericDescendants = descendantsMethod.MakeGenericMethod(drawingType);
+            System.Collections.IEnumerable drawings = (System.Collections.IEnumerable)genericDescendants.Invoke(para, null);
+            
+            foreach (object drawing in drawings)
+            {
+                string imageFileId = ExtractAndUploadImage(drawing, mainPart, inItem);
+                
+                if (!string.IsNullOrEmpty(imageFileId))
+                {
+                    imageIds.Add(imageFileId);
+                }
+            }
+        }
+    }
+    catch
+    {
+        // Continue processing
+    }
+    
+    return string.Join(",", imageIds.ToArray());
 }
 
 private string GetNumberingId(object para)
@@ -330,7 +809,6 @@ private string ProcessImagesInParagraph(object para, object mainPart, Item inIte
     catch (System.Exception ex)
     {
         // Log error but continue processing
-        // You could add logging here if needed
     }
     
     return imageXml.ToString();
@@ -341,9 +819,6 @@ private string ExtractAndUploadImage(object drawing, object mainPart, Item inIte
     try
     {
         // Navigate through the drawing structure to find the image relationship ID
-        // Drawing -> Inline -> Graphic -> GraphicData -> Picture -> BlipFill -> Blip
-        
-        // Get Inline elements
         System.Reflection.MethodInfo descendantsMethod = null;
         foreach (System.Reflection.MethodInfo method in drawing.GetType().GetMethods())
         {
@@ -583,85 +1058,6 @@ private string GetParagraphTextReflection(object para)
     }
     
     return text.ToString();
-}
-
-private void ProcessTableReflection(object table, System.Text.StringBuilder tdfContent)
-{
-    tdfContent.AppendFormat("<Table xmlns:aras=\"http://aras.com/ArasTechDoc\" aras:id=\"{0}\">", GenerateGuid());
-    
-    // Get TableRow type and elements
-    System.Type tableType = table.GetType();
-    System.Reflection.MethodInfo elementsMethod = null;
-    
-    foreach (System.Reflection.MethodInfo method in tableType.GetMethods())
-    {
-        if (method.Name == "Elements" && method.IsGenericMethod)
-        {
-            elementsMethod = method;
-            break;
-        }
-    }
-    
-    if (elementsMethod != null)
-    {
-        System.Type rowType = tableType.Assembly.GetType("DocumentFormat.OpenXml.Wordprocessing.TableRow");
-        System.Reflection.MethodInfo genericElements = elementsMethod.MakeGenericMethod(rowType);
-        System.Collections.IEnumerable rows = (System.Collections.IEnumerable)genericElements.Invoke(table, null);
-        
-        foreach (object row in rows)
-        {
-            tdfContent.AppendFormat("<Row aras:id=\"{0}\">", GenerateGuid());
-            
-            // Get cells
-            System.Type cellType = tableType.Assembly.GetType("DocumentFormat.OpenXml.Wordprocessing.TableCell");
-            System.Reflection.MethodInfo cellElements = elementsMethod.MakeGenericMethod(cellType);
-            System.Collections.IEnumerable cells = (System.Collections.IEnumerable)cellElements.Invoke(row, null);
-            
-            foreach (object cell in cells)
-            {
-                string cellText = GetCellTextReflection(cell);
-                tdfContent.AppendFormat("<Entry aras:id=\"{0}\"><aras:emph xmlns=\"\" emphtype=\"text\">{1}</aras:emph></Entry>", 
-                    GenerateGuid(), EscapeXml(cellText));
-            }
-            
-            tdfContent.Append("</Row>");
-        }
-    }
-    
-    tdfContent.Append("</Table>");
-}
-
-private string GetCellTextReflection(object cell)
-{
-    System.Text.StringBuilder text = new System.Text.StringBuilder();
-    
-    // Get paragraphs in cell
-    System.Type cellType = cell.GetType();
-    System.Reflection.MethodInfo elementsMethod = null;
-    
-    foreach (System.Reflection.MethodInfo method in cellType.GetMethods())
-    {
-        if (method.Name == "Elements" && method.IsGenericMethod)
-        {
-            elementsMethod = method;
-            break;
-        }
-    }
-    
-    if (elementsMethod != null)
-    {
-        System.Type paraType = cellType.Assembly.GetType("DocumentFormat.OpenXml.Wordprocessing.Paragraph");
-        System.Reflection.MethodInfo genericElements = elementsMethod.MakeGenericMethod(paraType);
-        System.Collections.IEnumerable paras = (System.Collections.IEnumerable)genericElements.Invoke(cell, null);
-        
-        foreach (object para in paras)
-        {
-            text.Append(GetParagraphTextReflection(para));
-            text.Append(" ");
-        }
-    }
-    
-    return text.ToString().Trim();
 }
 
 private string WrapInTDFStructure(string content)
