@@ -1,0 +1,70 @@
+	<xs:element name="Requirement-Chapter">
+		<xs:complexType>
+			<xs:complexContent>
+				<xs:extension base="aras:text">
+					<xs:attribute name="system_nottoplevel"/>
+				</xs:extension>
+			</xs:complexContent>
+		</xs:complexType>
+	</xs:element>
+
+	<xs:element name="Requirement-Title">
+		<xs:complexType>
+			<xs:complexContent>
+				<xs:extension base="aras:text">
+					<xs:attribute name="system_nottoplevel"/>
+				</xs:extension>
+			</xs:complexContent>
+		</xs:complexType>
+	</xs:element>
+
+	<xs:element name="Requirement-Number">
+		<xs:complexType>
+			<xs:complexContent>
+				<xs:extension base="aras:text">
+					<xs:attribute name="system_nottoplevel"/>
+				</xs:extension>
+			</xs:complexContent>
+		</xs:complexType>
+	</xs:element>
+
+	<xs:element name="Requirement-Info">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:choice minOccurs="3" maxOccurs="3">
+					<xs:element ref="Requirement-Chapter" minOccurs="1" maxOccurs="1"/>
+					<xs:element ref="Requirement-Title" minOccurs="1" maxOccurs="1"/>
+					<xs:element ref="Requirement-Number" minOccurs="1" maxOccurs="1"/>
+				</xs:choice>
+			</xs:sequence>
+			<xs:attribute name="system_nottoplevel"/>
+		</xs:complexType>
+	</xs:element>
+	
+	<xs:element name="Requirement">
+	    <xs:complexType>
+	        <xs:complexContent>
+	            <xs:extension base="aras:itemType">
+	                <xs:sequence>
+						<xs:element ref="Requirement-Info" minOccurs="1" maxOccurs="1"/>
+        				<xs:choice maxOccurs="unbounded">
+        					<xs:element ref="Label" />
+        					<xs:element ref="Graphic"/>
+        					<xs:element ref="Title"/>
+        					<xs:element ref="Subtitle"/>
+        					<xs:element ref="Text"/>
+        					<xs:element ref="List"/>
+        					<xs:element ref="List-Item"/>
+        					<xs:element ref="Table"/>
+        					<xs:element ref="Row"/>
+        					<xs:element ref="Entry"/>
+        					<xs:element ref="ItemInfo"/>
+        				</xs:choice>
+					</xs:sequence>
+	                <xs:attribute name="typeId" type="xs:string" fixed="55515617CB224C90AB5A9DAC0F061C2A"/>
+	                <xs:attribute name="system_nottoplevel"/>
+			        <xs:attribute name="system_internaluseonly"/>
+	            </xs:extension>
+	        </xs:complexContent>
+	    </xs:complexType>
+	</xs:element>
