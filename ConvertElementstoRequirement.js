@@ -1,4 +1,5 @@
-// SIMPLIFIED: Just add children to the already-created Requirement
+// FINAL: Create Requirement from Selected Elements - Separate Apply Calls
+// Working graphics on R30+.  !!!! Reference_id property isn't there in earlier versions, may need tweaking
 (async function() {
     const viewmodel = window.viewController.viewContext.data.structuredDocument;
     const actionsHelper = viewmodel.ActionsHelper();
@@ -21,7 +22,7 @@
     });
     
     // STEP 1: Copy to clipboard
-    console.log("\n[1/5] Copying to clipboard...");
+    console.log("\n[1/6] Copying to clipboard...");
     actionsHelper.executeAction('copyelement', {
         selectedItems: selectedItems,
         clipboard: clipboard
@@ -30,8 +31,86 @@
     const clipboardData = clipboard.getData('StructureXml');
     console.log(`✅ Copied ${clipboardData.content.length} elements`);
     
-    // STEP 2: Create requirement (this creates the Requirement wrapper + Requirement-Info)
-    console.log("\n[2/5] Creating requirement...");
+    // STEP 2: Build content template
+    console.log("\n[2/6] Building requirement content...");
+    
+    function generateGuid() {
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+            const r = Math.random() * 16 | 0;
+            const v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16).toUpperCase();
+        }).replace(/-/g, '');
+    }
+    
+    // Track image IDs for relationship creation
+    const imageIds = [];
+    
+	// Track both ref-id and imageId for each graphic
+	const graphicReferences = []; // Array of {refId, imageId}
+	
+	function convertGraphicToREStandard(node) {
+		const guid = generateGuid();
+		const imageId = node.getAttribute('imageId');
+		const style = node.getAttribute('style') || '';
+		
+		// Generate new ref-id for RE-Standard
+		const newRefId = generateGuid();
+		
+		// Track BOTH ref-id and imageId for relationship creation
+		graphicReferences.push({
+			refId: newRefId,
+			imageId: imageId
+		});
+		
+		// Build RE-Standard compliant Graphic
+		let graphicXml = `<Graphic aras:id="${guid}"`;
+		graphicXml += ` ref-id="${newRefId}"`;
+		graphicXml += ` imageId="${imageId}"`;
+		if (style) {
+			graphicXml += ` style="${style}"`;
+		}
+		graphicXml += ` />`;
+		
+		console.log(`  ✅ Converted Graphic (imageId: ${imageId}, ref-id: ${newRefId})`);
+		return graphicXml;
+	}
+    
+    // Build content template
+    let requirementXmlTemplate = `<Requirement xmlns:aras="http://aras.com/ArasTechDoc" xmlns="http://www.aras.com/REStandard" aras:id="${generateGuid()}" reqId="{{REQ_ID}}">`;
+    requirementXmlTemplate += `<Requirement-Info aras:id="${generateGuid()}">`;
+    requirementXmlTemplate += `<Requirement-Chapter aras:id="${generateGuid()}"><aras:emph emphtype="text"></aras:emph></Requirement-Chapter>`;
+    requirementXmlTemplate += `<Requirement-Title aras:id="${generateGuid()}"><aras:emph emphtype="text">{{REQ_NUMBER}}</aras:emph></Requirement-Title>`;
+    requirementXmlTemplate += `<Requirement-Number aras:id="${generateGuid()}"><aras:emph emphtype="text">{{REQ_NUMBER}}</aras:emph></Requirement-Number>`;
+    requirementXmlTemplate += `</Requirement-Info>`;
+    
+    // Add copied content
+    let includedCount = 0;
+    
+    for (let i = 0; i < clipboardData.content.length; i++) {
+        const contentItem = clipboardData.content[i];
+        const nodeName = contentItem.nodeName || contentItem.tagName;
+        
+        if (nodeName === 'Graphic') {
+            const graphicXml = convertGraphicToREStandard(contentItem);
+            requirementXmlTemplate += graphicXml;
+            includedCount++;
+        } else {
+            const nodeXml = contentItem.xml || new XMLSerializer().serializeToString(contentItem);
+            requirementXmlTemplate += nodeXml;
+            includedCount++;
+            console.log(`  ✅ Added: ${nodeName}`);
+        }
+    }
+    
+    requirementXmlTemplate += `</Requirement>`;
+    
+    console.log(`✅ Template ready (${includedCount} elements)`);
+    if (imageIds.length > 0) {
+        console.log(`   Found ${imageIds.length} image(s) to reference`);
+    }
+    
+    // STEP 3: Create requirement
+    console.log("\n[3/6] Creating requirement...");
     console.log("⏳ Please fill out the requirement form");
     
     const context = selectedItems[0];
@@ -55,99 +134,76 @@
     const reqNumber = reqItemNode.selectSingleNode('item_number')?.text || 'Unknown';
     
     console.log(`✅ Created ${reqNumber} (ID: ${reqId})`);
-    console.log(`   Requirement element children: ${reqElement.ChildItems().List().length}`);
     
-    // STEP 3: Add copied elements directly to the Requirement element
-    console.log("\n[3/5] Adding content to requirement...");
+    // STEP 4: Save content
+    console.log("\n[4/6] Saving content to database...");
     
-    viewmodel.SuspendInvalidation();
+    // Replace placeholders
+    let requirementXml = requirementXmlTemplate
+        .replace(/\{\{REQ_ID\}\}/g, reqId)
+        .replace(/\{\{REQ_NUMBER\}\}/g, reqNumber);
     
-    try {
-        let addedCount = 0;
-        let skippedGraphics = 0;
-        
-        const reqChildList = reqElement.ChildItems();
-        
-        for (let i = 0; i < clipboardData.content.length; i++) {
-            const contentItem = clipboardData.content[i];
-            const nodeName = contentItem.nodeName || contentItem.tagName;
-            
-            if (nodeName === 'Graphic') {
-                skippedGraphics++;
-                console.log(`  ⚠️ Skipped: Graphic`);
-                continue;
-            }
-            
-            // Clone the element
-            const clonedNode = contentItem.cloneNode(true);
-            
-            // Import into the requirement's document
-            const importedNode = reqElement.origin.ownerDocument.importNode(clonedNode, true);
-            
-            // Append to the requirement's origin
-            reqElement.origin.appendChild(importedNode);
-            
-            // Create XmlSchemaElement wrapper
-            const childElement = viewmodel.CreateElement('element', {
-                origin: importedNode
-            });
-            
-            if (childElement) {
-                // Add to the child list
-                reqChildList.insertAt(reqChildList.List().length, childElement);
-                addedCount++;
-                console.log(`  ✅ Added: ${nodeName}`);
-            } else {
-                console.log(`  ⚠️ Failed to create element: ${nodeName}`);
-            }
-        }
-        
-        console.log(`✅ Added ${addedCount} elements to requirement`);
-        
-    } finally {
-        viewmodel.ResumeInvalidation();
-        viewmodel.invalidateElement(reqElement);
+    // Update content
+    const updateAml = `<Item type="re_Requirement" action="edit" id="${reqId}">
+        <content><![CDATA[${requirementXml}]]></content>
+    </Item>`;
+    
+    const updateResult = aras.soapSend('ApplyItem', updateAml);
+    
+    let hasError = false;
+    if (typeof updateResult === 'string') {
+        hasError = updateResult.includes('SOAP-ENV:Fault');
+    } else if (updateResult.node) {
+        hasError = updateResult.selectSingleNode('//faultstring') !== null;
     }
     
-    // STEP 4: Save the requirement with its new content
-    console.log("\n[4/5] Saving requirement to database...");
-    
-    try {
-        // Get the requirement's full XML
-        const reqOriginXml = reqElement.origin.xml;
-        
-        console.log("Requirement XML length:", reqOriginXml.length);
-        console.log("Requirement children count:", reqElement.ChildItems().List().length);
-        
-        // Save to database
-        const updateAml = `<Item type="re_Requirement" action="edit" id="${reqId}">
-            <content><![CDATA[${reqOriginXml}]]></content>
-        </Item>`;
-        
-        const updateResult = aras.soapSend('ApplyItem', updateAml);
-        
-        let hasError = false;
-        if (typeof updateResult === 'string') {
-            hasError = updateResult.includes('SOAP-ENV:Fault');
-        } else if (updateResult.node) {
-            hasError = updateResult.selectSingleNode('//faultstring') !== null;
-        }
-        
-        if (hasError) {
-            console.error("❌ Failed to save content");
-            console.error(updateResult);
-            return;
-        }
-        
-        console.log(`✅ Saved to database`);
-        
-    } catch (error) {
-        console.error("❌ Error saving:", error);
+    if (hasError) {
+        console.error("❌ Failed to save content");
+        console.error(updateResult);
         return;
     }
     
-    // STEP 5: Remove elements from source
-    console.log("\n[5/5] Removing elements from source...");
+    console.log(`✅ Saved content to database`);
+    
+	// If graphics referenced
+	if (graphicReferences.length > 0) {
+		console.log(`\nCreating image reference relationships...`);
+		
+		for (let i = 0; i < graphicReferences.length; i++) {
+			const graphic = graphicReferences[i];
+			
+			const refItem = aras.newIOMItem('re_ImageReference', 'add');
+			refItem.setProperty('source_id', reqId);
+			refItem.setProperty('related_id', graphic.imageId);  // tp_Image ID
+			refItem.setProperty('reference_id', graphic.refId);  // ref-id from Graphic element
+			
+			const refResult = refItem.apply();
+			
+			if (refResult.isError()) {
+				console.warn(`⚠️ Failed to create reference for image: ${graphic.imageId}`);
+				console.warn(refResult.getErrorString());
+			} else {
+				console.log(`  ✅ Created reference (imageId: ${graphic.imageId}, ref-id: ${graphic.refId})`);
+			}
+		}
+		
+		console.log(`✅ Created ${graphicReferences.length} image reference(s)`);
+	}
+    
+    // STEP 5: Refresh the requirement element
+    console.log("\n[5/6] Refreshing requirement content...");
+    
+    try {
+        const contentHelper = viewmodel.ContentGeneration();
+        contentHelper.refreshStaticContent(reqElement);
+        console.log("✅ Content refreshed in document");
+    } catch (error) {
+        console.warn("⚠️ Could not refresh content:", error.message);
+        console.log("   You may need to manually refresh the element");
+    }
+    
+    // STEP 6: Remove elements from source
+    console.log("\n[6/6] Removing elements from source...");
     
     viewmodel.SuspendInvalidation();
     
@@ -155,13 +211,8 @@
         let removedCount = 0;
         for (let i = 0; i < selectedItems.length; i++) {
             const item = selectedItems[i];
-            const nodeName = item.nodeName || item.tagName;
-            
-            if (nodeName === 'Graphic') {
-                continue;
-            }
-            
             const parent = item.Parent;
+            
             if (parent) {
                 const childList = parent.ChildItems();
                 const position = childList.index(item);
@@ -188,11 +239,16 @@
     console.log("✅ COMPLETE");
     console.log("=".repeat(50));
     console.log(`Requirement: ${reqNumber}`);
-    console.log(`Children in requirement: ${reqElement.ChildItems().List().length}`);
+    console.log(`Elements moved: ${includedCount}`);
+    if (imageIds.length > 0) {
+        console.log(`Image references: ${imageIds.length}`);
+    }
     
     return {
         requirementId: reqId,
         requirementNumber: reqNumber,
-        element: reqElement
+        element: reqElement,
+        movedElements: includedCount,
+        imageReferences: imageIds.length
     };
 })();
