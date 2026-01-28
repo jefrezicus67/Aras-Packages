@@ -1,5 +1,5 @@
-// FINAL: Create Requirement from Selected Elements - Separate Apply Calls
-// Working graphics on R30+.  !!!! Reference_id property isn't there in earlier versions, may need tweaking
+// FINAL: Create Requirement from Selected Elements - with Nested Graphics Support
+//R30+ version.  Needs viewmodel and ES5 adjustment for earlier versions
 (async function() {
     const viewmodel = window.viewController.viewContext.data.structuredDocument;
     const actionsHelper = viewmodel.ActionsHelper();
@@ -42,38 +42,87 @@
         }).replace(/-/g, '');
     }
     
-    // Track image IDs for relationship creation
-    const imageIds = [];
+    // Track both ref-id and imageId for each graphic
+    const graphicReferences = []; // Array of {refId, imageId}
     
-	// Track both ref-id and imageId for each graphic
-	const graphicReferences = []; // Array of {refId, imageId}
-	
-	function convertGraphicToREStandard(node) {
-		const guid = generateGuid();
-		const imageId = node.getAttribute('imageId');
-		const style = node.getAttribute('style') || '';
-		
-		// Generate new ref-id for RE-Standard
-		const newRefId = generateGuid();
-		
-		// Track BOTH ref-id and imageId for relationship creation
-		graphicReferences.push({
-			refId: newRefId,
-			imageId: imageId
-		});
-		
-		// Build RE-Standard compliant Graphic
-		let graphicXml = `<Graphic aras:id="${guid}"`;
-		graphicXml += ` ref-id="${newRefId}"`;
-		graphicXml += ` imageId="${imageId}"`;
-		if (style) {
-			graphicXml += ` style="${style}"`;
-		}
-		graphicXml += ` />`;
-		
-		console.log(`  ✅ Converted Graphic (imageId: ${imageId}, ref-id: ${newRefId})`);
-		return graphicXml;
-	}
+    function convertGraphicToREStandard(node) {
+        const guid = generateGuid();
+        const imageId = node.getAttribute('imageId');
+        const style = node.getAttribute('style') || '';
+        
+        // Generate new ref-id for RE-Standard
+        const newRefId = generateGuid();
+        
+        // Track BOTH ref-id and imageId for relationship creation
+        graphicReferences.push({
+            refId: newRefId,
+            imageId: imageId
+        });
+        
+        // Build RE-Standard compliant Graphic
+        let graphicXml = `<Graphic xmlns:aras="http://aras.com/ArasTechDoc" aras:id="${guid}"`;
+        graphicXml += ` ref-id="${newRefId}"`;
+        graphicXml += ` imageId="${imageId}"`;
+        if (style) {
+            graphicXml += ` style="${style}"`;
+        }
+        graphicXml += ` />`;
+        
+        console.log(`  ✅ Converted Graphic (imageId: ${imageId}, ref-id: ${newRefId})`);
+        return graphicXml;
+    }
+    
+    function processNodeForGraphics(node) {
+        // If this is a Graphic, convert it
+        if (node.nodeName === 'Graphic' || node.tagName === 'Graphic') {
+            return convertGraphicToREStandard(node);
+        }
+        
+        // If this node has children, process them recursively
+        if (node.childNodes && node.childNodes.length > 0) {
+            // Create a temporary document to manipulate the node
+            const tempDoc = node.ownerDocument || new XmlDocument();
+            const clonedNode = node.cloneNode(true);
+            
+            // Process all child nodes
+            const children = clonedNode.childNodes;
+            for (let i = 0; i < children.length; i++) {
+                const child = children[i];
+                if (child.nodeType === 1) { // Element node
+                    if (child.nodeName === 'Graphic' || child.tagName === 'Graphic') {
+                        // Convert the graphic
+                        const graphicXml = convertGraphicToREStandard(child);
+                        
+                        // Parse the new graphic XML
+                        const graphicDoc = new XmlDocument();
+                        graphicDoc.loadXML(graphicXml);
+                        const newGraphicNode = graphicDoc.documentElement;
+                        
+                        // Import and replace
+                        const importedNode = clonedNode.ownerDocument.importNode(newGraphicNode, true);
+                        clonedNode.replaceChild(importedNode, child);
+                    } else {
+                        // Recursively process this child
+                        const processedChildXml = processNodeForGraphics(child);
+                        if (processedChildXml !== null) {
+                            // Parse and replace
+                            const childDoc = new XmlDocument();
+                            childDoc.loadXML(processedChildXml);
+                            const newChildNode = childDoc.documentElement;
+                            const importedNode = clonedNode.ownerDocument.importNode(newChildNode, true);
+                            clonedNode.replaceChild(importedNode, child);
+                        }
+                    }
+                }
+            }
+            
+            // Return the processed node XML
+            return clonedNode.xml || new XMLSerializer().serializeToString(clonedNode);
+        }
+        
+        // No children or no graphics found - return original XML
+        return null;
+    }
     
     // Build content template
     let requirementXmlTemplate = `<Requirement xmlns:aras="http://aras.com/ArasTechDoc" xmlns="http://www.aras.com/REStandard" aras:id="${generateGuid()}" reqId="{{REQ_ID}}">`;
@@ -91,11 +140,15 @@
         const nodeName = contentItem.nodeName || contentItem.tagName;
         
         if (nodeName === 'Graphic') {
+            // Top-level Graphic
             const graphicXml = convertGraphicToREStandard(contentItem);
             requirementXmlTemplate += graphicXml;
             includedCount++;
+            console.log(`  ✅ Added: ${nodeName}`);
         } else {
-            const nodeXml = contentItem.xml || new XMLSerializer().serializeToString(contentItem);
+            // Process the node for nested graphics
+            const processedXml = processNodeForGraphics(contentItem);
+            const nodeXml = processedXml || (contentItem.xml || new XMLSerializer().serializeToString(contentItem));
             requirementXmlTemplate += nodeXml;
             includedCount++;
             console.log(`  ✅ Added: ${nodeName}`);
@@ -105,8 +158,8 @@
     requirementXmlTemplate += `</Requirement>`;
     
     console.log(`✅ Template ready (${includedCount} elements)`);
-    if (imageIds.length > 0) {
-        console.log(`   Found ${imageIds.length} image(s) to reference`);
+    if (graphicReferences.length > 0) {
+        console.log(`   Found ${graphicReferences.length} graphic(s) to reference`);
     }
     
     // STEP 3: Create requirement
@@ -165,30 +218,30 @@
     
     console.log(`✅ Saved content to database`);
     
-	// If graphics referenced
-	if (graphicReferences.length > 0) {
-		console.log(`\nCreating image reference relationships...`);
-		
-		for (let i = 0; i < graphicReferences.length; i++) {
-			const graphic = graphicReferences[i];
-			
-			const refItem = aras.newIOMItem('re_ImageReference', 'add');
-			refItem.setProperty('source_id', reqId);
-			refItem.setProperty('related_id', graphic.imageId);  // tp_Image ID
-			refItem.setProperty('reference_id', graphic.refId);  // ref-id from Graphic element
-			
-			const refResult = refItem.apply();
-			
-			if (refResult.isError()) {
-				console.warn(`⚠️ Failed to create reference for image: ${graphic.imageId}`);
-				console.warn(refResult.getErrorString());
-			} else {
-				console.log(`  ✅ Created reference (imageId: ${graphic.imageId}, ref-id: ${graphic.refId})`);
-			}
-		}
-		
-		console.log(`✅ Created ${graphicReferences.length} image reference(s)`);
-	}
+    // Create image reference relationships
+    if (graphicReferences.length > 0) {
+        console.log(`\nCreating image reference relationships...`);
+        
+        for (let i = 0; i < graphicReferences.length; i++) {
+            const graphic = graphicReferences[i];
+            
+            const refItem = aras.newIOMItem('re_ImageReference', 'add');
+            refItem.setProperty('source_id', reqId);
+            refItem.setProperty('related_id', graphic.imageId);
+            refItem.setProperty('reference_id', graphic.refId);
+            
+            const refResult = refItem.apply();
+            
+            if (refResult.isError()) {
+                console.warn(`⚠️ Failed to create reference for image: ${graphic.imageId}`);
+                console.warn(refResult.getErrorString());
+            } else {
+                console.log(`  ✅ Created reference (imageId: ${graphic.imageId}, ref-id: ${graphic.refId})`);
+            }
+        }
+        
+        console.log(`✅ Created ${graphicReferences.length} image reference(s)`);
+    }
     
     // STEP 5: Refresh the requirement element
     console.log("\n[5/6] Refreshing requirement content...");
@@ -240,8 +293,8 @@
     console.log("=".repeat(50));
     console.log(`Requirement: ${reqNumber}`);
     console.log(`Elements moved: ${includedCount}`);
-    if (imageIds.length > 0) {
-        console.log(`Image references: ${imageIds.length}`);
+    if (graphicReferences.length > 0) {
+        console.log(`Graphic references: ${graphicReferences.length}`);
     }
     
     return {
@@ -249,6 +302,6 @@
         requirementNumber: reqNumber,
         element: reqElement,
         movedElements: includedCount,
-        imageReferences: imageIds.length
+        imageReferences: graphicReferences.length
     };
 })();
