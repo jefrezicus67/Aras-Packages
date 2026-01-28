@@ -110,43 +110,54 @@ void CopyRequirementChildren(DocumentSchemaElement sourceRequirement, ItemDocume
         if (childElement.NodeName == "Requirement-Info")
             continue;
         
-        // Handle Graphics specially
-        if (childElement.NodeName == "Graphic")
+        // Clone the element first
+        DocumentSchemaElement clonedElement = childElement.Clone() as DocumentSchemaElement;
+        
+        if (clonedElement != null)
         {
-            string imageId = childElement.GetAttribute("imageId");
+            // After cloning, recursively fix any Graphics inside
+            FixGraphicsInElement(clonedElement, inn);
+            
+            // Add to target
+            targetItem.AddChild(clonedElement);
+        }
+    }
+}
+
+// Recursively find and fix Graphics in an element
+void FixGraphicsInElement(DocumentSchemaElement element, Innovator inn)
+{
+    // Check if this element itself is a Graphic
+    if (element.NodeName == "Graphic")
+    {
+        ImageDocumentElement imageElement = element as ImageDocumentElement;
+        if (imageElement != null)
+        {
+            string imageId = imageElement.GetAttribute("imageId");
             
             if (!string.IsNullOrEmpty(imageId))
             {
-                // Fetch the tp_Image item (use the passed inn parameter)
+                // Fetch the tp_Image item
                 Item imageItem = inn.newItem("tp_Image", "get");
                 imageItem.setID(imageId);
                 imageItem = imageItem.apply();
                 
                 if (!imageItem.isError())
                 {
-                    // Create a new ImageDocumentElement (Graphic)
-                    ImageDocumentElement imageElement = (ImageDocumentElement) this.Factory.NewElement("Graphic");
-                    
-                    if (imageElement != null)
-                    {
-                        // Set the image on the element - this sets up all the external references
-                        imageElement.SetImage(imageItem);
-                        
-                        // Add to target
-                        targetItem.AddChild(imageElement);
-                    }
+                    // Set the image on the element
+                    imageElement.SetImage(imageItem);
                 }
             }
-            
-            continue;
         }
-        
-        // All other elements - clone and add
-        DocumentSchemaElement clonedElement = childElement.Clone() as DocumentSchemaElement;
-        
-        if (clonedElement != null)
+    }
+    
+    // Recursively process all children
+    foreach (DocumentSchemaNode child in element.Childs)
+    {
+        DocumentSchemaElement childElement = child as DocumentSchemaElement;
+        if (childElement != null)
         {
-            targetItem.AddChild(clonedElement);
+            FixGraphicsInElement(childElement, inn);
         }
     }
 }
