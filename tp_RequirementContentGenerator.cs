@@ -1,5 +1,4 @@
 //MethodTemplateName=CSharp:Aras.TDF.ContentGenerator(Strict);
-//Inserts the content of a requirement from the <content> property into the technical document
 
 ItemDocumentElement targetItem = targetElement as ItemDocumentElement;
 
@@ -41,7 +40,7 @@ if (targetItem != null)
                     if (requirementElement != null)
                     {
                         // Copy all child elements (except Requirement-Info) to the target
-                        CopyRequirementChildren(requirementElement, targetItem);
+                        CopyRequirementChildren(requirementElement, targetItem, inn);
                     }
                 }
             }
@@ -98,7 +97,7 @@ DocumentSchemaElement FindRequirementElement(DocumentSchemaElement rootElement)
 }
 
 // Copy child elements from requirement content to target element in TD
-void CopyRequirementChildren(DocumentSchemaElement sourceRequirement, ItemDocumentElement targetItem)
+void CopyRequirementChildren(DocumentSchemaElement sourceRequirement, ItemDocumentElement targetItem, Innovator inn)
 {
     foreach (DocumentSchemaNode child in sourceRequirement.Childs)
     {
@@ -111,7 +110,38 @@ void CopyRequirementChildren(DocumentSchemaElement sourceRequirement, ItemDocume
         if (childElement.NodeName == "Requirement-Info")
             continue;
         
-        // Clone and add all other elements (Text, List, Table, Graphic, etc.)
+        // Handle Graphics specially
+        if (childElement.NodeName == "Graphic")
+        {
+            string imageId = childElement.GetAttribute("imageId");
+            
+            if (!string.IsNullOrEmpty(imageId))
+            {
+                // Fetch the tp_Image item (use the passed inn parameter)
+                Item imageItem = inn.newItem("tp_Image", "get");
+                imageItem.setID(imageId);
+                imageItem = imageItem.apply();
+                
+                if (!imageItem.isError())
+                {
+                    // Create a new ImageDocumentElement (Graphic)
+                    ImageDocumentElement imageElement = (ImageDocumentElement) this.Factory.NewElement("Graphic");
+                    
+                    if (imageElement != null)
+                    {
+                        // Set the image on the element - this sets up all the external references
+                        imageElement.SetImage(imageItem);
+                        
+                        // Add to target
+                        targetItem.AddChild(imageElement);
+                    }
+                }
+            }
+            
+            continue;
+        }
+        
+        // All other elements - clone and add
         DocumentSchemaElement clonedElement = childElement.Clone() as DocumentSchemaElement;
         
         if (clonedElement != null)
