@@ -1,0 +1,771 @@
+
+			IDisposable elevatedPermissionsScope = null;
+			String techDocPriveledgedPublisherId = "86F8574A13814269A1CEC0E012AEADB2";
+			String identityList = CCO.Permissions.IdentitiesList;
+
+			if (identityList.IndexOf(techDocPriveledgedPublisherId, System.StringComparison.Ordinal) != -1)
+			{
+				//Aras.Server.Security.Identity identity = Aras.Server.Security.Identity.GetByName("Super User");
+				//elevatedPermissionsScope = CCO.Permissions.GrantIdentity(identity);
+				elevatedPermissionsScope = CCO.Permissions.GrantIdentity(_superUserIdentity.Value); //NEW
+			}
+
+			try
+			{
+				// Method is used for SchemaElementsFactory instantiation because it should use the same builder method that is currently active
+				RequestState["contentBuilderMethod"] = this.getAction();
+				// recursionsCount stores number of content builder method calls in context of same request
+				// it should be tracked in order to avoid recursive calls from dynamic content generators
+				RequestState["recursionsCount"] = (RequestState.Contains("recursionsCount") ? (int)RequestState["recursionsCount"] : 0) + 1;
+
+				//Item itemTypeSettings = GetItemTypeConfig(this.getInnovator(), this.getType());
+				Item itemTypeSettings = GetItemTypeConfigFast(this.getInnovator(), this.getType()); //NEW
+
+				// Ensure per-request caches are created //NEW
+				_typeCfgCache.Value = GetTypeCfgCache(); //NEW
+				_latestVersionCache.Value = GetLatestVersionCache(); //NEW
+
+				return Execute(this, RequestState, itemTypeSettings);
+			}
+			finally
+			{
+				elevatedPermissionsScope?.Dispose();
+
+				  // Clear per-request caches to avoid accidental leakage across requests //NEW
+					_typeCfgCache.Value = null; //NEW
+					_latestVersionCache.Value = null; //NEW
+			}
+		}
+
+		//NEW: Per-request caches (AsyncLocal so concurrent requests don't collide)
+		private static readonly System.Threading.AsyncLocal<Dictionary<string, Item>> _typeCfgCache = new System.Threading.AsyncLocal<Dictionary<string, Item>>(); //NEW
+		private static readonly System.Threading.AsyncLocal<Dictionary<string, string>> _latestVersionCache = new System.Threading.AsyncLocal<Dictionary<string, string>>(); //NEW
+
+		//NEW: Cache for Super User identity lookup across process lifetime (lazy)
+		private static readonly Lazy<Aras.Server.Security.Identity> _superUserIdentity = //NEW
+				new Lazy<Aras.Server.Security.Identity>(() => Aras.Server.Security.Identity.GetByName("Super User")); //NEW
+
+		//NEW: Safe getters for the current request's caches
+		private static Dictionary<string, Item> GetTypeCfgCache() //NEW
+				=> _typeCfgCache.Value ?? (_typeCfgCache.Value = new Dictionary<string, Item>(StringComparer.Ordinal)); //NEW
+
+		private static Dictionary<string, string> GetLatestVersionCache() //NEW
+				=> _latestVersionCache.Value ?? (_latestVersionCache.Value = new Dictionary<string, string>(StringComparer.Ordinal)); //NEW
+
+		//NEW: Cached ItemType settings
+		private static Item GetItemTypeConfigFast(Innovator inn, string type) //NEW
+		{ //NEW
+			var cache = GetTypeCfgCache(); //NEW
+			if (!cache.TryGetValue(type, out var cfg)) //NEW
+			{ //NEW
+				// cfg = GetItemTypeConfig(inn, type); // original helper (keep for reference) //NEW
+				var req = inn.newItem(type, "tdf_GetItemTypeSettings"); //NEW
+				cfg = req.apply(); //NEW
+				cache[type] = cfg; //NEW
+			} //NEW
+			return cfg; //NEW
+		} //NEW
+
+		//NEW: Cached latest-version resolution (returns empty string if current or error)
+		private static string TryGetLatestVersionIdCached(Item anyItem) //NEW
+		{ //NEW
+			if (anyItem == null) return string.Empty; //NEW
+
+			// If current, no need to look anything up //NEW
+			var isCurrent = anyItem.getProperty("is_current"); //NEW
+			if (isCurrent != "0") return string.Empty; //NEW
+
+			var type = anyItem.getType(); //NEW
+			var id = anyItem.getID(); //NEW
+			if (string.IsNullOrEmpty(type) || string.IsNullOrEmpty(id)) return string.Empty; //NEW
+
+			var key = type + ":" + id; //NEW
+			var cache = GetLatestVersionCache(); //NEW
+			if (cache.TryGetValue(key, out var cached)) return cached; //NEW
+
+			// Fallback: single call with caching //NEW
+			var latestItemVersion = anyItem.newItem(type, "getItemLastVersion"); //NEW
+			latestItemVersion.setID(id); //NEW
+			latestItemVersion = latestItemVersion.apply(); //NEW
+			if (!latestItemVersion.isError()) //NEW
+			{ //NEW
+				var latestId = latestItemVersion.getID(); //NEW
+				cache[key] = latestId ?? string.Empty; //NEW
+				return latestId ?? string.Empty; //NEW
+			} //NEW
+
+			cache[key] = string.Empty; //NEW
+			return string.Empty; //NEW
+		} //NEW
+
+
+		internal static Item Execute(Item targetDocument, Aras.Server.Core.IContextState requestState, Item itemTypeSettings)
+		{
+			Innovator innovator = targetDocument.getInnovator();
+			String byReference = targetDocument.getAttribute("by-reference", "internal");
+			String defaultLangCode = innovator.getI18NSessionContext().GetDefaultLanguageCode();
+			String langCode = targetDocument.getAttribute("language", defaultLangCode);
+			Item rootBlockItem = GetDocumentStructure(targetDocument, langCode, itemTypeSettings);
+
+			if (rootBlockItem.isError())// something's wrong. There is no element with such blockId or the user does not have permissions to get it
+			{
+				return innovator.newError(rootBlockItem.getErrorString());
+			}
+
+			string schemaPropertyName = itemTypeSettings.getProperty("datamodel.schemaPropertyName");
+			Item externalLinks = GetDocumentExternalLinks(targetDocument, itemTypeSettings);
+			Item xmlSchema = rootBlockItem.getPropertyItem(schemaPropertyName);
+
+			StringBuilder docContent = new StringBuilder();
+			XmlWriterSettings settings = new XmlWriterSettings();
+			settings.Indent = false;
+			settings.OmitXmlDeclaration = true;
+
+			using (XmlWriter xw = XmlWriter.Create(docContent, settings))
+			{
+				xw.WriteStartElement("aras", "document", "http://aras.com/ArasTechDoc");
+				{
+					xw.WriteStartAttribute("xmlns");
+					xw.WriteValue(xmlSchema.getProperty("target_namespace"));
+					xw.WriteEndAttribute();
+
+					xw.WriteStartAttribute("schemaid");
+					xw.WriteValue(xmlSchema.getID());
+					xw.WriteEndAttribute();
+
+					xw.WriteStartElement("aras", "content", "http://aras.com/ArasTechDoc");
+					{
+						AppendBlock(xw, langCode, rootBlockItem, null, byReference, itemTypeSettings);
+					}
+					xw.WriteEndElement();
+
+					// build referencesXmls and updated content for elements with dynamic content generators
+					Dictionary<String, String> referenceItemXmls = GetAllReferenceXmls(rootBlockItem, byReference == "external", langCode, itemTypeSettings);
+					Tuple<Dictionary<String, XmlNode>, Dictionary<String, XmlNode>> updatedDynamicData = GetDynamicElementsData(innovator, requestState, rootBlockItem, langCode, referenceItemXmls, itemTypeSettings);
+					Dictionary<String, XmlNode> customContentNodes = updatedDynamicData.Item1;
+					Dictionary<String, XmlNode> customContentReferences = updatedDynamicData.Item2;
+
+					// append document external references to output
+					xw.WriteStartElement("aras", "references", "http://aras.com/ArasTechDoc");
+					{
+						foreach (KeyValuePair<String, String> referenceXmlData in referenceItemXmls)
+						{
+							xw.WriteRaw(referenceXmlData.Value);
+							customContentReferences.Remove(referenceXmlData.Key);
+						}
+
+						foreach (XmlNode referenceNode in customContentReferences.Values)
+						{
+							referenceNode.WriteTo(xw);
+						}
+					}
+					xw.WriteEndElement();
+
+					// append externalLinks to output
+					xw.WriteStartElement("aras", "externalLinks", "http://aras.com/ArasTechDoc");
+					{
+						for (int i = 0; i < externalLinks.getItemCount(); i++)
+						{
+							Item sourceBlock = externalLinks.getItemByIndex(i);
+							Item linkReference = sourceBlock.getRelationships(itemTypeSettings.getProperty("datamodel.relationships.linkReference")).getItemByIndex(0);
+
+							AppendExternalLink(xw, sourceBlock, linkReference);
+						}
+					}
+					xw.WriteEndElement();
+
+					// append generatedContent if dynamic elements present in document
+					xw.WriteStartElement("aras", "generatedContent", "http://aras.com/ArasTechDoc");
+					{
+						foreach (XmlNode elementNode in customContentNodes.Values)
+						{
+							elementNode.WriteTo(xw);
+						}
+					}
+				}
+				xw.WriteEndElement();
+			}
+
+			return innovator.newResult(docContent.ToString());
+		}
+
+		internal static string GetDocumentItemRequestAml(Innovator innovator, string type, string language, bool root = true)
+		{
+			Item itemTypeSettings = GetItemTypeConfig(innovator, type);
+
+			string documentReference = itemTypeSettings.getProperty("datamodel.relationships.documentReference");
+			string imageReference = itemTypeSettings.getProperty("datamodel.relationships.imageReference");
+			string itemReference = itemTypeSettings.getProperty("datamodel.relationships.itemReference");
+			string linkReference = itemTypeSettings.getProperty("datamodel.relationships.linkReference");
+			string schemaProperty = itemTypeSettings.getProperty("datamodel.schemaPropertyName");
+			string externalDocumentType = itemTypeSettings.getProperty("datamodel.relationships.documentReferenceRelatedType", type);
+			bool sameDocumentTypes = string.Equals(type, externalDocumentType, StringComparison.Ordinal);
+
+			return $@"
+				<Item type='{type}' select='id,content,{schemaProperty},condition,config_id,name,item_number,is_current,major_rev,generation,locked_by_id,modified_on' action='{(sameDocumentTypes ? "GetItemRepeatConfig" : "get")}' language='{language}'>
+					{(root ? $@"<{schemaProperty}>
+						<Item type='tp_XmlSchema' select='name,content,target_namespace' action='get'>
+							<Relationships>
+								<Item type='tp_XmlSchemaElement' action='get' select='name,content_generator,is_content_dynamic'/>
+							</Relationships>
+						</Item>
+					</{schemaProperty}>" : String.Empty)}
+					<Relationships>
+						{(sameDocumentTypes
+							? $@"<Item type='{documentReference}' select='reference_id,ignore_all_versions,ignored_version_id,related_id' repeatTimes='0' repeatProp='related_id'></Item>"
+							: $@"<Item type='{documentReference}' select='reference_id,ignore_all_versions,ignored_version_id,related_id'>
+										<related_id>{GetDocumentItemRequestAml(innovator, externalDocumentType, language, false)}</related_id>
+									</Item>"
+						)}
+						<Item type='{imageReference}' select='reference_id,ignore_all_versions,ignored_version_id,related_id(id,src,is_current,major_rev,generation)'></Item>
+						<Item type='{itemReference}' select='reference_id,ignore_all_versions,ignored_version_id,related_id'></Item>
+						<Item type='{linkReference}' select='reference_id,path,related_id,targetelement'></Item>
+					</Relationships>
+				</Item>";
+		}
+
+		internal static Item GetDocumentStructure(Item documentItem, String languageCode, Item itemTypeSettings)
+		{
+			Item requestItem = documentItem.newItem();
+			string documentItemGetter = itemTypeSettings.getProperty("documentItemGetter");
+			string type = documentItem.getType();
+
+			if (string.IsNullOrEmpty(documentItemGetter))
+			{
+				string documentStructureAml = GetDocumentItemRequestAml(documentItem.getInnovator(), type, languageCode); 
+				#pragma warning disable IA1000 // Improper escaping of Special Elements used in an AML Query
+				requestItem.loadAML(documentStructureAml);
+				#pragma warning restore IA1000 // Improper escaping of Special Elements used in an AML Query
+				requestItem.setID(documentItem.getID());
+			}
+			else
+			{
+				requestItem.setAction(documentItemGetter);
+				requestItem.setType(type);
+				requestItem.setAttribute("language", languageCode);
+				requestItem.setID(documentItem.getID());
+			}
+
+			return requestItem.apply();
+		}
+
+		internal static Item GetDocumentExternalLinks(Item documentItem, Item itemTypeSettings)
+		{
+			string linkReference = itemTypeSettings.getProperty("datamodel.relationships.linkReference");
+			string type = documentItem.getType();
+			string id = documentItem.getID();
+
+			String externalLinksAml = $@"
+				<Item type='{type}' action='get'>
+					<Relationships>
+						<Item type='{linkReference}' action='get'>
+							<related_id>{id}</related_id>
+						</Item>
+					</Relationships>
+				</Item>";
+
+			Item requestItem = documentItem.newItem();
+			#pragma warning disable IA1000 // Improper escaping of Special Elements used in an AML Query
+			requestItem.loadAML(externalLinksAml);
+			#pragma warning restore IA1000 // Improper escaping of Special Elements used in an AML Query
+
+			return requestItem.apply();
+		}
+
+		internal static Item GetItemTypeConfig(Innovator innovator, string type)
+		{
+			var request = innovator.newItem(type, "tdf_GetItemTypeSettings");
+			return request.apply();
+		}
+
+		internal static List<string> GetDocumentTypes(Innovator innovator, string type) {
+			//var itemTypeConfig = GetItemTypeConfig(innovator, type);
+			var itemTypeConfig = GetItemTypeConfigFast(innovator, type); //NEW
+			var types = new List<string>(){type};
+			var externalType = itemTypeConfig.getProperty("datamodel.relationships.documentReferenceRelatedType", type);
+
+			while (!types.Contains(externalType))
+			{
+				types.Add(externalType);
+
+				//itemTypeConfig = GetItemTypeConfig(innovator, externalType);
+				itemTypeConfig = GetItemTypeConfigFast(innovator, externalType); //NEW
+				externalType = itemTypeConfig.getProperty("datamodel.relationships.documentReferenceRelatedType", type);
+			}
+
+			return types;
+		}
+
+		internal static Dictionary<String, String> GetAllReferenceXmls(Item targetDocument, Boolean isDocumentExternal, String languageCode, Item itemTypeSettings)
+		{
+			// reference content preparation section:
+			// reference elements content should be generated before dynamic content to set required references if that will be needed
+			// Use // in xpath because we need to get references from all levels
+
+			HashSet<String> existingReferences = new HashSet<String>();
+			Dictionary<String, String> referenceItemXmls = new Dictionary<String, String>();
+			StringBuilder referenceXmlContent = new StringBuilder();
+			var innovator = targetDocument.getInnovator();
+			String referenceId;
+
+			XmlWriterSettings writerSettings = new XmlWriterSettings();
+			writerSettings.Indent = false;
+			writerSettings.OmitXmlDeclaration = true;
+			writerSettings.ConformanceLevel = ConformanceLevel.Fragment;
+			using (XmlWriter fragmentWriter = XmlWriter.Create(referenceXmlContent, writerSettings))
+			{
+				var types = GetDocumentTypes(innovator, targetDocument.getType());
+
+				foreach (string documentType in types)
+				{
+					var documentTypeSettings = GetItemTypeConfig(innovator, documentType);
+					string documentReference = documentTypeSettings.getProperty("datamodel.relationships.documentReference");
+					string imageReference = documentTypeSettings.getProperty("datamodel.relationships.imageReference");
+					string itemReference = documentTypeSettings.getProperty("datamodel.relationships.itemReference");
+					string linkReference = documentTypeSettings.getProperty("datamodel.relationships.linkReference");
+
+					Item documentReferences = targetDocument.getItemsByXPath($"//Relationships/Item[@type='{documentReference}' or @type='{imageReference}' or @type='{itemReference}' or @type='{linkReference}']");
+					int referenceCount = documentReferences.getItemCount();
+
+					for (int referenceIndex = 0; referenceIndex < referenceCount; referenceIndex++)
+					{
+						Item currentReference = documentReferences.getItemByIndex(referenceIndex);
+						String referenceType = currentReference.getType();
+						referenceId = currentReference.getProperty("reference_id");
+
+						if (!IsReferenceDuplicate(currentReference, existingReferences))
+						{
+							switch (referenceType)
+							{
+								case var type when type == documentReference:
+									AppendBlock(fragmentWriter, languageCode, currentReference.getRelatedItem(), currentReference, "external", itemTypeSettings);
+									break;
+								case var type when type == imageReference:
+									AppendImage(fragmentWriter, currentReference);
+									break;
+								case var type when type == itemReference:
+									AppendItem(fragmentWriter, currentReference);
+									break;
+								case var type when type == linkReference:
+									AppendLink(fragmentWriter, currentReference);
+									break;
+							}
+
+							fragmentWriter.Flush();
+							referenceItemXmls.Add(referenceId, referenceXmlContent.ToString());
+							referenceXmlContent.Clear();
+						}
+					}
+				}
+
+				if (isDocumentExternal)
+				{
+					referenceId = targetDocument.getProperty("reference_id");
+					AppendBlock(fragmentWriter, languageCode, targetDocument, targetDocument, "external", itemTypeSettings);
+					fragmentWriter.Flush();
+					referenceItemXmls.Add(referenceId, referenceXmlContent.ToString());
+					referenceXmlContent.Clear();
+				}
+			}
+
+			return referenceItemXmls;
+		}
+
+		internal static Tuple<Dictionary<String, XmlNode>, Dictionary<String, XmlNode>> GetDynamicElementsData(Innovator innovatorInstance, Aras.Server.Core.IContextState requestState, Item targetDocument, String languageCode, Dictionary<String, String> referenceXmls, Item itemTypeSettings)
+		{
+			Dictionary<String, XmlNode> customContentNodes = new Dictionary<String, XmlNode>();
+			Dictionary<String, XmlNode> customContentReferences = new Dictionary<String, XmlNode>();
+			int recursionsCount = (int)requestState["recursionsCount"];
+
+			if (recursionsCount > 1)
+			{
+				return new Tuple<Dictionary<String, XmlNode>, Dictionary<String, XmlNode>>(customContentNodes, customContentReferences);
+			}
+
+			// custom content generation section
+			string schemaPropertyName = itemTypeSettings.getProperty("datamodel.schemaPropertyName");
+			Item xmlSchema = targetDocument.getPropertyItem(schemaPropertyName);
+			Item elementRelationships = xmlSchema.getRelationships("tp_XmlSchemaElement");
+			int elementsCount = elementRelationships.getItemCount();
+			List<String> dynamicElementNames = new List<String>();
+
+			for (int i = 0; i < elementsCount; i++)
+			{
+				Item currentRelationship = elementRelationships.getItemByIndex(i);
+				String contentGeneratorId = currentRelationship.getProperty("content_generator");
+
+				if (!String.IsNullOrEmpty(contentGeneratorId) && currentRelationship.getProperty("is_content_dynamic") == "1")
+				{
+					dynamicElementNames.Add(currentRelationship.getProperty("name"));
+				}
+			}
+
+			// if dynamic elements present in schema, then
+			if (dynamicElementNames.Count > 0)
+			{
+				StringBuilder contentString = new StringBuilder();
+				using (XmlWriter writer = XmlWriter.Create(contentString))
+				{
+					writer.WriteStartElement("aras", "document", "http://aras.com/ArasTechDoc");
+					{
+						writer.WriteStartAttribute("xmlns");
+						writer.WriteValue(xmlSchema.getProperty("target_namespace"));
+						writer.WriteEndAttribute();
+
+						writer.WriteRaw(targetDocument.getProperty("content"));
+					}
+					writer.WriteEndElement();
+				}
+
+				XmlDocument documentContent = innovatorInstance.newItem().dom;
+				documentContent.XmlResolver = null;
+				documentContent.PreserveWhitespace = false; //NEW
+				documentContent.LoadXml(contentString.ToString());
+				List<XmlNode> nodeList = SearchDynamicElements(dynamicElementNames, documentContent.DocumentElement, new List<XmlNode>());
+
+				// if in documentContent there are dynamic elements, then generate content for them
+				if (nodeList.Count > 0)
+				{
+					Aras.TDF.Base.SchemaElementFactory factory = CreateFactory(targetDocument, innovatorInstance, xmlSchema.getID(), (string)requestState["contentBuilderMethod"]);
+					factory.CustomContentEnabled = true;
+					factory.DefaultLanguageCode = languageCode;
+
+					foreach (XmlElement elementNode in nodeList)
+					{
+						String referenceId = elementNode.GetAttribute("ref-id");
+						if (referenceXmls.ContainsKey(referenceId))
+						{
+							factory.AddReference(referenceXmls[referenceId]);
+						}
+
+						Aras.TDF.Base.DocumentSchemaNode schemaNode = factory.ParseElement(elementNode);
+						factory.SearchReferenceNodesRecursively(schemaNode, customContentReferences);
+						factory.SearchGeneratedContentNodesRecursively(schemaNode, customContentNodes);
+					}
+				}
+			}
+
+			return new Tuple<Dictionary<String, XmlNode>, Dictionary<String, XmlNode>>(customContentNodes, customContentReferences);
+		}
+
+		static void AppendImage(XmlWriter xw, Item imageReference)
+		{
+			Item imageItem = imageReference.getRelatedItem();
+			Boolean hasReferenceItem = imageItem != null;
+
+			xw.WriteStartElement("aras", "image", "http://aras.com/ArasTechDoc");
+			{
+				Dictionary<string, string> referenceProperties = new Dictionary<string, string>();
+
+				if (hasReferenceItem)
+				{
+					String isCurrent = imageItem.getProperty("is_current");
+					String latestVersionId = "";
+
+					if (isCurrent == "0")
+					{
+						//Item latestItemVersion = imageItem.newItem(imageItem.getType(), "getItemLastVersion");
+						//latestItemVersion.setID(imageItem.getID());
+						//latestItemVersion = latestItemVersion.apply();
+
+						//if (!latestItemVersion.isError())
+						//{
+						//	latestVersionId = latestItemVersion.getID();
+						//}
+
+						latestVersionId = TryGetLatestVersionIdCached(imageItem); //NEW
+					}
+
+					referenceProperties.Add("isCurrent", imageItem.getProperty("is_current"));
+					referenceProperties.Add("majorVersion", imageItem.getProperty("major_rev"));
+					referenceProperties.Add("minorVersion", imageItem.getProperty("generation"));
+					referenceProperties.Add("latestVersionId", latestVersionId);
+
+					if (imageItem.getAttribute("discover_only") == "1")
+					{
+						xw.WriteAttributeString("isBlocked", "true");
+					}
+					else
+					{
+						xw.WriteAttributeString("src", imageItem.getProperty("src"));
+					}
+					xw.WriteAttributeString("imageId", imageItem.getID());
+				}
+				else
+				{
+					if (imageReference.getPropertyAttribute("related_id", "is_null") == "0")
+					{
+						xw.WriteAttributeString("isBlocked", "true");
+						String blockUid = Guid.NewGuid().ToString().Replace("-", "", StringComparison.Ordinal).ToUpper(CultureInfo.CurrentCulture);
+						xw.WriteAttributeString("imageId", blockUid);
+					}
+				}
+
+				referenceProperties.Add("referenceId", imageReference.getID());
+				referenceProperties.Add("ignoredVersionId", imageReference.getProperty("ignored_version_id"));
+				referenceProperties.Add("ignoreAllVersions", imageReference.getProperty("ignore_all_versions"));
+
+				// add required attributes
+				xw.WriteAttributeString("ref-id", imageReference.getProperty("reference_id"));
+				xw.WriteAttributeString("referenceProperties", Newtonsoft.Json.JsonConvert.SerializeObject(referenceProperties));
+			}
+
+			xw.WriteEndElement();
+		}
+
+		static void AppendLink(XmlWriter xw, Item itemReference)
+		{
+			xw.WriteStartElement("aras", "link", "http://aras.com/ArasTechDoc");
+			{
+				xw.WriteAttributeString("ref-id", itemReference.getProperty("reference_id"));
+				xw.WriteAttributeString("linkId", itemReference.getID());
+				xw.WriteAttributeString("path", itemReference.getProperty("path"));
+				xw.WriteAttributeString("targetBlock", itemReference.getProperty("related_id"));
+				xw.WriteAttributeString("targetElement", itemReference.getProperty("targetelement"));
+			}
+			xw.WriteEndElement();
+		}
+
+		static void AppendExternalLink(XmlWriter xw, Item sourceBlock, Item itemReference)
+		{
+			xw.WriteStartElement("aras", "link", "http://aras.com/ArasTechDoc");
+			{
+				xw.WriteAttributeString("linkId", itemReference.getID());
+				xw.WriteAttributeString("sourceBlock", itemReference.getProperty("source_id"));
+				xw.WriteAttributeString("blockName", sourceBlock.getProperty("keyed_name"));
+				xw.WriteAttributeString("targetElement", itemReference.getProperty("targetelement"));
+				xw.WriteAttributeString("path", itemReference.getProperty("path"));
+			}
+			xw.WriteEndElement();
+		}
+
+		static void AppendItem(XmlWriter xw, Item itemReference)
+		{
+			Item itemItem = itemReference.getRelatedItem();
+			Boolean hasReferenceItem = itemItem != null;
+
+			xw.WriteStartElement("aras", "item", "http://aras.com/ArasTechDoc");
+			{
+				Dictionary<string, string> referenceProperties = new Dictionary<string, string>();
+
+				if (hasReferenceItem)
+				{
+					String isCurrent = itemItem.getProperty("is_current");
+					String latestVersionId = "";
+
+					if (isCurrent == "0")
+					{
+						//Item latestItemVersion = itemItem.newItem(itemItem.getType(), "getItemLastVersion");
+						//latestItemVersion.setID(itemItem.getID());
+						//latestItemVersion = latestItemVersion.apply();
+
+						//if (!latestItemVersion.isError())
+						//{
+						//	latestVersionId = latestItemVersion.getID();
+						//}
+
+						latestVersionId = TryGetLatestVersionIdCached(itemItem); //NEW
+					}
+
+					referenceProperties.Add("isCurrent", itemItem.getProperty("is_current"));
+					referenceProperties.Add("majorVersion", itemItem.getProperty("major_rev"));
+					referenceProperties.Add("minorVersion", itemItem.getProperty("generation"));
+					referenceProperties.Add("latestVersionId", latestVersionId);
+				}
+
+				referenceProperties.Add("referenceId", itemReference.getID());
+				referenceProperties.Add("ignoredVersionId", itemReference.getProperty("ignored_version_id"));
+				referenceProperties.Add("ignoreAllVersions", itemReference.getProperty("ignore_all_versions"));
+
+				// add required attributes
+				xw.WriteAttributeString("ref-id", itemReference.getProperty("reference_id"));
+				xw.WriteAttributeString("referenceProperties", Newtonsoft.Json.JsonConvert.SerializeObject(referenceProperties));
+
+				if (hasReferenceItem)
+				{
+					itemItem.node.SetAttribute("xmlns", String.Empty);
+					if (itemItem.getAttribute("discover_only") == "1")
+					{
+						XmlNode itemEmptyNode = itemItem.node.CloneNode(false);
+
+						xw.WriteAttributeString("isBlocked", "true");
+						itemEmptyNode.WriteTo(xw);
+					}
+					else
+					{
+						itemItem.node.WriteTo(xw);
+					}
+				}
+
+				if (!hasReferenceItem && itemReference.getPropertyAttribute("related_id", "is_null") == "0")
+				{
+					xw.WriteAttributeString("isBlocked", "true");
+				}
+			}
+
+			xw.WriteEndElement();
+		}
+
+		static void AppendBlock(XmlWriter xw, String langCode, Item blockItem, Item referenceItem, String byReference, Item itemTypeSettings)
+		{
+			Boolean isExternalBlock = byReference == "external";
+
+			xw.WriteStartElement("aras", "block", "http://aras.com/ArasTechDoc");
+			{
+				if (isExternalBlock && blockItem == null)
+				{
+					String blockId = referenceItem.getProperty("reference_id");
+					String blockUid = Guid.NewGuid().ToString().Replace("-", "", StringComparison.Ordinal).ToUpper(CultureInfo.CurrentCulture);
+
+					xw.WriteAttributeString("ref-id", blockId);
+					xw.WriteAttributeString("by-reference", byReference);
+					xw.WriteAttributeString("aras", "id", null, blockUid);
+					xw.WriteAttributeString("isBlocked", "true");
+				}
+				else if (isExternalBlock && referenceItem == null)
+				{
+					String blockId = blockItem.getID();
+					String blockUid = Guid.NewGuid().ToString().Replace("-", "", StringComparison.Ordinal).ToUpper(CultureInfo.CurrentCulture);
+
+					xw.WriteAttributeString("ref-id", blockId);
+					xw.WriteAttributeString("by-reference", byReference);
+					xw.WriteAttributeString("aras", "id", null, blockUid);
+					blockItem.setProperty("reference_id", blockId);
+				}
+				else
+				{
+					String blockId = blockItem.getID();
+					Boolean isBlocked = blockItem.getAttribute("discover_only") == "1";
+					String conditionValue = blockItem.getProperty("condition", "");
+					Item itemSnapshot = blockItem.clone(false);
+
+					itemSnapshot.removeAttribute("action");
+					itemSnapshot.setID(blockId);
+
+					XmlNodeList contentPropertyNodes = itemSnapshot.node.SelectNodes("./*[local-name()='content']");
+					for (int i = 0; i < contentPropertyNodes.Count; i++)
+					{
+						itemSnapshot.node.RemoveChild(contentPropertyNodes[i]);
+					}
+					string schemaPropertyName = itemTypeSettings.getProperty("datamodel.schemaPropertyName");
+					itemSnapshot.removeProperty(schemaPropertyName);
+
+					if (!String.IsNullOrEmpty(conditionValue))
+					{
+						xw.WriteAttributeString("aras", "condition", null, conditionValue);
+					}
+
+					xw.WriteAttributeString("blockId", blockId);
+					xw.WriteAttributeString("by-reference", byReference);
+					xw.WriteAttributeString("aras", "id", null, blockId);
+					xw.WriteAttributeString("aras", "itemAML", null, itemSnapshot.node.OuterXml);
+
+					if (isExternalBlock)
+					{
+						Dictionary<string, string> referenceProperties = new Dictionary<string, string>();
+						String isCurrent = isBlocked ? "1" : blockItem.getProperty("is_current");
+
+						referenceProperties.Add("referenceId", referenceItem.getID());
+						referenceProperties.Add("isCurrent", isCurrent);
+
+						if (!isBlocked)
+						{
+							String latestVersionId = String.Empty;
+
+							if (isCurrent == "0")
+							{
+								//Item latestBlockVersion = blockItem.newItem(blockItem.getType(), "getItemLastVersion");
+								//latestBlockVersion.setID(blockId);
+								//latestBlockVersion = latestBlockVersion.apply();
+
+								//if (!latestBlockVersion.isError())
+								//{
+								//	latestVersionId = latestBlockVersion.getID();
+								//}
+
+								latestVersionId = TryGetLatestVersionIdCached(blockItem); //NEW
+							}
+
+							referenceProperties.Add("majorVersion", blockItem.getProperty("major_rev"));
+							referenceProperties.Add("minorVersion", blockItem.getProperty("generation"));
+							referenceProperties.Add("latestVersionId", latestVersionId);
+							referenceProperties.Add("ignoredVersionId", referenceItem.getProperty("ignored_version_id"));
+							referenceProperties.Add("ignoreAllVersions", referenceItem.getProperty("ignore_all_versions"));
+						}
+
+						// add required attributes
+						xw.WriteAttributeString("ref-id", referenceItem.getProperty("reference_id"));
+						xw.WriteAttributeString("referenceProperties", Newtonsoft.Json.JsonConvert.SerializeObject(referenceProperties));
+					}
+
+					if (isBlocked)
+					{
+						xw.WriteAttributeString("isBlocked", "true");
+					}
+					else
+					{
+						xw.WriteRaw(blockItem.getProperty("content", "", langCode));
+					}
+				}
+			}
+			xw.WriteEndElement();
+		}
+
+		internal static List<XmlNode> SearchDynamicElements(List<String> compareList, XmlNode targetNode, List<XmlNode> targetList)
+		{
+			if (targetList == null)
+			{
+				targetList = new List<XmlNode>();
+			}
+
+			if (targetNode != null)
+			{
+				if (compareList.Contains(targetNode.Name))
+				{
+					targetList.Add(targetNode);
+				}
+				else if (targetNode.HasChildNodes)
+				{
+					foreach (XmlNode childNode in targetNode.ChildNodes)
+					{
+						if (childNode.NodeType == XmlNodeType.Element)
+						{
+							SearchDynamicElements(compareList, childNode, targetList);
+						}
+					}
+				}
+			}
+
+			return targetList;
+		}
+
+		static Boolean IsReferenceDuplicate(Item referenceItem, HashSet<String> existingIds)
+		{
+			if (referenceItem != null)
+			{
+				String referenceId = referenceItem.getProperty("reference_id");
+
+				if (!existingIds.Contains(referenceId))
+				{
+					existingIds.Add(referenceId);
+				}
+				else
+				{
+					return true;
+				}
+			}
+
+			return false;
+		}
+
+		public static Aras.TDF.Base.SchemaElementFactory CreateFactory(Item thisItem, Innovator innovatorInstance, string schemaId, string contentBuilderMethod)
+		{
+			if (thisItem == null)
+			{
+				throw new ArgumentException("thisItem should be not null");
+			}
+
+			var executionContext = new Aras.TDF.Base.SchemaElementExecutionContext(thisItem.getID(), thisItem.getType(), contentBuilderMethod);
+			return new Aras.TDF.Base.SchemaElementFactory(innovatorInstance, schemaId, executionContext);
+			
+		

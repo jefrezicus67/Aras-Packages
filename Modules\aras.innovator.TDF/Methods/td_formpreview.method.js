@@ -6,6 +6,9 @@ var SUPPORTED_ITEM_TYPES = {
 	re_Requirement: true,
 	re_Requirement_Document: true
 };
+var ITEMTYPE_SCHEMA_PROPERTY_CACHE = {};
+var SCHEMA_DYNAMIC_CACHE = {};
+var SCHEMA_NAMESPACE_CACHE = {};
 
 function resolveSupportedItemType(itemTypeName) {
 	if (!itemTypeName) {
@@ -699,6 +702,7 @@ function loadPreview(hWrapper, itemId) {
 			previewItem = prepareStandaloneRequirementPreviewItem(selectedItem);
 		}
 	}
+	previewItem = fetchPreviewItemForMode(previewItem, itemTypeName, itemId);
 
 	status.style.display = "flex";
 	status.style.color = "#666";
@@ -708,7 +712,13 @@ function loadPreview(hWrapper, itemId) {
 
 	var candidates = buildLinkEditorCandidates();
 
-	var dialogArguments = buildDialogArguments(previewItem, itemId, itemTypeName);
+	var previewMode = getPreviewModeConfig(previewItem, itemTypeName, itemId);
+	var dialogArguments = buildDialogArguments(
+		previewItem,
+		itemId,
+		itemTypeName,
+		previewMode
+	);
 	iframe.dialogArguments = dialogArguments;
 
 	tryLoadCandidate(0);
@@ -747,6 +757,42 @@ function loadPreview(hWrapper, itemId) {
 
 		iframe.src = url;
 	}
+}
+
+function fetchPreviewItemForMode(previewItem, fallbackItemTypeName, fallbackItemId) {
+	if (!previewItem || !aras || typeof aras.newIOMItem !== "function") {
+		return previewItem;
+	}
+
+	var itemTypeName =
+		(previewItem.getType && previewItem.getType()) || fallbackItemTypeName;
+	var itemId =
+		normalizeItemId(previewItem.getID && previewItem.getID()) ||
+		normalizeItemId(fallbackItemId);
+
+	if (!itemTypeName || !itemId) {
+		return previewItem;
+	}
+
+	var schemaPropertyName = getSchemaPropertyName(itemTypeName);
+	var selectProps = ["id", "content", "condition", "req_document_type", "xml_schema"];
+
+	if (schemaPropertyName && selectProps.indexOf(schemaPropertyName) === -1) {
+		selectProps.push(schemaPropertyName);
+	}
+
+	try {
+		var query = aras.newIOMItem(itemTypeName, "get");
+		query.setID(itemId);
+		query.setAttribute("select", selectProps.join(","));
+		var result = query.apply();
+
+		if (result && !(result.isError && result.isError())) {
+			return result;
+		}
+	} catch (e) {}
+
+	return previewItem;
 }
 
 function buildLinkEditorCandidates() {
@@ -1023,7 +1069,10 @@ function findSourceIdByRelationship(relationshipTypeName, relatedId) {
 	return null;
 }
 
-function buildDialogArguments(item, itemId, itemTypeName) {
+function buildDialogArguments(item, itemId, itemTypeName, previewMode) {
+	previewMode = previewMode || {};
+	var dialogItem = item && item.node ? item.node : item;
+
 	var lang = "en";
 	try {
 		lang = aras.getSessionContextLanguageCode() || "en";
@@ -1052,9 +1101,13 @@ function buildDialogArguments(item, itemId, itemTypeName) {
 	return {
 		aras: aras,
 		title: "Preview - " + itemTypeName,
-		thisItem: item,
+		thisItem: dialogItem,
 		tdfSettings: tdfSettings,
 		itemTypeSettings: itemTypeSettings,
+		asyncDataLoading: true,
+		additionalSettings: {
+			standaloneMode: !!previewMode.standaloneMode
+		},
 		linkData: {
 			elementId: "",
 			blockId: itemId,
@@ -1069,6 +1122,197 @@ function buildDialogArguments(item, itemId, itemTypeName) {
 			}
 		}
 	};
+}
+
+function getPreviewModeConfig(previewItem, itemTypeName, itemId) {
+	var config = { standaloneMode: false };
+	var schemaId = resolvePreviewSchemaId(previewItem, itemTypeName);
+	if (!schemaId) {
+		return config;
+	}
+
+	if (isDynamicSchema(schemaId)) {
+		return config;
+	}
+
+	var documentXml = buildStandaloneDocumentXml(previewItem, schemaId, itemId);
+	if (!documentXml) {
+		return config;
+	}
+
+	try {
+		if (typeof previewItem.setProperty === "function") {
+			previewItem.setProperty("document_xml", documentXml);
+			config.standaloneMode = true;
+		}
+	} catch (e) {}
+
+	return config;
+}
+
+function resolvePreviewSchemaId(previewItem, itemTypeName) {
+	var schemaPropertyName = getSchemaPropertyName(itemTypeName);
+	var schemaId = null;
+
+	if (schemaPropertyName && previewItem && typeof previewItem.getProperty === "function") {
+		schemaId = normalizeItemId(previewItem.getProperty(schemaPropertyName));
+	}
+
+	if (!schemaId && previewItem && typeof previewItem.getProperty === "function") {
+		schemaId = normalizeItemId(previewItem.getProperty("req_document_type"));
+	}
+	if (!schemaId && previewItem && typeof previewItem.getProperty === "function") {
+		schemaId = normalizeItemId(previewItem.getProperty("xml_schema"));
+	}
+
+	return schemaId;
+}
+
+function getSchemaPropertyName(itemTypeName) {
+	if (!itemTypeName) {
+		return null;
+	}
+
+	if (ITEMTYPE_SCHEMA_PROPERTY_CACHE[itemTypeName]) {
+		return ITEMTYPE_SCHEMA_PROPERTY_CACHE[itemTypeName];
+	}
+
+	try {
+		var settingsItem = aras.newIOMItem(itemTypeName, "tdf_GetItemTypeSettings");
+		var settingsResult = settingsItem.apply();
+		if (settingsResult && !(settingsResult.isError && settingsResult.isError())) {
+			var schemaPropertyName = settingsResult.getProperty("datamodel.schemaPropertyName");
+			if (schemaPropertyName) {
+				ITEMTYPE_SCHEMA_PROPERTY_CACHE[itemTypeName] = schemaPropertyName;
+				return schemaPropertyName;
+			}
+		}
+	} catch (e) {}
+
+	return null;
+}
+
+function isDynamicSchema(schemaId) {
+	if (!schemaId) {
+		return false;
+	}
+	if (Object.prototype.hasOwnProperty.call(SCHEMA_DYNAMIC_CACHE, schemaId)) {
+		return SCHEMA_DYNAMIC_CACHE[schemaId];
+	}
+
+	var isDynamic = false;
+	try {
+		var query = aras.newIOMItem("", "");
+		query.loadAML(
+			"<AML>" +
+				"<Item type='tp_XmlSchema' action='get' id='" +
+				schemaId +
+				"'>" +
+					"<Relationships>" +
+						"<Item type='tp_XmlSchemaElement' action='get' select='id,content_generator,is_content_dynamic'/>" +
+					"</Relationships>" +
+				"</Item>" +
+			"</AML>"
+		);
+		var result = query.apply();
+		if (result && !(result.isError && result.isError())) {
+			var elements = result.getRelationships("tp_XmlSchemaElement");
+			var count = elements && elements.getItemCount ? elements.getItemCount() : 0;
+			var i;
+			for (i = 0; i < count; i++) {
+				var schemaElement = elements.getItemByIndex(i);
+				if (
+					schemaElement.getProperty("is_content_dynamic") === "1" &&
+					schemaElement.getProperty("content_generator")
+				) {
+					isDynamic = true;
+					break;
+				}
+			}
+		}
+	} catch (e) {}
+
+	SCHEMA_DYNAMIC_CACHE[schemaId] = isDynamic;
+	return isDynamic;
+}
+
+function buildStandaloneDocumentXml(previewItem, schemaId, itemId) {
+	if (!previewItem || typeof previewItem.getProperty !== "function") {
+		return "";
+	}
+
+	var content = previewItem.getProperty("content");
+	if (!content) {
+		return "";
+	}
+
+	var documentItemId =
+		normalizeItemId(itemId) ||
+		normalizeItemId(previewItem.getID && previewItem.getID()) ||
+		"";
+	var conditionValue = previewItem.getProperty("condition", "");
+	var namespaceValue = getSchemaNamespace(schemaId);
+	var safeNamespace = escapeXmlAttribute(namespaceValue || "urn:aras:tdf:preview");
+	var safeSchemaId = escapeXmlAttribute(schemaId);
+	var safeBlockId = escapeXmlAttribute(documentItemId);
+	var conditionAttribute = conditionValue
+		? " aras:condition='" + escapeXmlAttribute(conditionValue) + "'"
+		: "";
+
+	return (
+		"<aras:document xmlns:aras='http://aras.com/ArasTechDoc' xmlns='" +
+		safeNamespace +
+		"' schemaid='" +
+		safeSchemaId +
+		"'>" +
+			"<aras:content>" +
+				"<aras:block blockId='" +
+				safeBlockId +
+				"' by-reference='internal' aras:id='" +
+				safeBlockId +
+				"'" +
+				conditionAttribute +
+				">" +
+					content +
+				"</aras:block>" +
+			"</aras:content>" +
+			"<aras:references/>" +
+			"<aras:externalLinks/>" +
+			"<aras:generatedContent/>" +
+		"</aras:document>"
+	);
+}
+
+function getSchemaNamespace(schemaId) {
+	if (!schemaId) {
+		return "";
+	}
+	if (Object.prototype.hasOwnProperty.call(SCHEMA_NAMESPACE_CACHE, schemaId)) {
+		return SCHEMA_NAMESPACE_CACHE[schemaId];
+	}
+
+	var namespaceValue = "";
+	try {
+		var schemaItem = aras.newIOMItem("tp_XmlSchema", "get");
+		schemaItem.setAttribute("select", "target_namespace");
+		schemaItem.setID(schemaId);
+		var schemaResult = schemaItem.apply();
+		if (schemaResult && !(schemaResult.isError && schemaResult.isError())) {
+			namespaceValue = schemaResult.getProperty("target_namespace", "");
+		}
+	} catch (e) {}
+
+	SCHEMA_NAMESPACE_CACHE[schemaId] = namespaceValue;
+	return namespaceValue;
+}
+
+function escapeXmlAttribute(value) {
+	return String(value || "")
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&apos;");
 }
 
 function createPreviewDialogNode() {
