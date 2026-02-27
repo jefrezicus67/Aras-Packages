@@ -724,25 +724,21 @@ function loadPreview(hWrapper, itemId) {
 			return;
 		}
 
-		var separator = candidates[index].indexOf("?") >= 0 ? "&" : "?";
-		var url = candidates[index] + separator + "_ts=" + Date.now();
+		var url = appendTimestamp(candidates[index]);
 		iframe.dialogArguments = dialogArguments;
 
 		iframe.onload = function () {
-			try {
-				var child = iframe.contentWindow;
-				var ok = !!(child && child.viewController);
-				if (!ok) {
+			waitForDialogReady(
+				iframe,
+				function () {
+					state.isLoading = false;
+					status.style.display = "none";
+					iframe.style.display = "block";
+				},
+				function () {
 					tryLoadCandidate(index + 1);
-					return;
 				}
-
-				state.isLoading = false;
-				status.style.display = "none";
-				iframe.style.display = "block";
-			} catch (e) {
-				tryLoadCandidate(index + 1);
-			}
+			);
 		};
 
 		iframe.onerror = function () {
@@ -816,6 +812,49 @@ function buildLinkEditorCandidates() {
 		}
 		pushUnique(roots, normalized);
 	}
+}
+
+function appendTimestamp(url) {
+	var clean = String(url || "");
+	// Keep only one _ts parameter and avoid malformed '?...?...' sequences.
+	clean = clean.replace(/([?&])_ts=\d+/g, "$1");
+	clean = clean.replace(/\?+/g, "?");
+	clean = clean.replace(/\?&/g, "?");
+	clean = clean.replace(/[?&]$/, "");
+	var separator = clean.indexOf("?") >= 0 ? "&" : "?";
+	return clean + separator + "_ts=" + Date.now();
+}
+
+function waitForDialogReady(iframe, onReady, onFailed) {
+	var tries = 0;
+	var maxTries = 40; // ~4s at 100ms
+
+	(function check() {
+		tries++;
+		try {
+			var child = iframe.contentWindow;
+			var doc = child && child.document;
+			var hasController = !!(child && child.viewController);
+			var hasDialogDom = !!(
+				doc &&
+				(doc.getElementById("borderContainer") || doc.getElementById("techDocTree"))
+			);
+			var isReady = !!(doc && doc.readyState === "complete");
+
+			// In older clients, controller may initialize slightly after onload.
+			if (hasController || (hasDialogDom && isReady && tries > 5)) {
+				onReady();
+				return;
+			}
+		} catch (e) {}
+
+		if (tries >= maxTries) {
+			onFailed();
+			return;
+		}
+
+		setTimeout(check, 100);
+	})();
 }
 
 function getClientRootFromCurrentLocation() {
