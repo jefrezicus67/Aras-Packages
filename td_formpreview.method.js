@@ -724,7 +724,8 @@ function loadPreview(hWrapper, itemId) {
 			return;
 		}
 
-		var url = candidates[index] + "&_ts=" + Date.now();
+		var separator = candidates[index].indexOf("?") >= 0 ? "&" : "?";
+		var url = candidates[index] + separator + "_ts=" + Date.now();
 		iframe.dialogArguments = dialogArguments;
 
 		iframe.onload = function () {
@@ -764,12 +765,15 @@ function buildLinkEditorCandidates() {
 	} catch (e) {}
 
 	var roots = [];
-	addRoot(baseUrl);
-	addRoot(origin + baseUrl);
-	addRoot(baseUrl.replace(/\/Server(?=\/|$)/i, "/Client"));
-	addRoot((origin + baseUrl).replace(/\/Server(?=\/|$)/i, "/Client"));
-	addRoot(origin + "/Client");
-	addRoot(origin);
+	addRoot(getClientRootFromCurrentLocation());
+	addRoot(normalizeClientRoot(baseUrl));
+	addRoot(normalizeClientRoot(origin + baseUrl));
+	addRoot(normalizeClientRoot(baseUrl.replace(/\/Server(?=\/|$)/i, "/Client")));
+	addRoot(
+		normalizeClientRoot((origin + baseUrl).replace(/\/Server(?=\/|$)/i, "/Client"))
+	);
+	addRoot(normalizeClientRoot(origin + "/Client"));
+	addRoot(normalizeClientRoot(origin));
 
 	var out = [];
 	var i;
@@ -778,9 +782,16 @@ function buildLinkEditorCandidates() {
 		if (!root) {
 			continue;
 		}
-		// R25/R32 preferred route (matches normal LinkEditor request pattern)
+		// Primary route (matches working direct browser URL in R25/R32)
+		pushUnique(out, root + "/Modules/aras.innovator.TDF/LinkEditorDialog");
+		// Same route with explicit view-only mode.
 		pushUnique(out, root + "/Modules/aras.innovator.TDF/LinkEditorDialog?viewonly=1");
 		// Legacy fallback (some environments resolve without /Client prefix)
+		pushUnique(
+			out,
+			root.replace(/\/Client(?=\/|$)/i, "") +
+				"/Modules/aras.innovator.TDF/LinkEditorDialog"
+		);
 		pushUnique(
 			out,
 			root.replace(/\/Client(?=\/|$)/i, "") +
@@ -799,12 +810,37 @@ function buildLinkEditorCandidates() {
 		if (!value) {
 			return;
 		}
-		var normalized = String(value).replace(/\/+$/, "");
+		var normalized = normalizeClientRoot(value);
 		if (!normalized) {
 			return;
 		}
 		pushUnique(roots, normalized);
 	}
+}
+
+function getClientRootFromCurrentLocation() {
+	try {
+		var origin = window.location.origin || "";
+		var path = window.location.pathname || "";
+		var marker = "/Client";
+		var idx = path.toLowerCase().indexOf(marker.toLowerCase());
+		if (idx >= 0) {
+			return normalizeClientRoot(origin + path.substring(0, idx + marker.length));
+		}
+		return normalizeClientRoot(origin);
+	} catch (e) {
+		return "";
+	}
+}
+
+function normalizeClientRoot(value) {
+	if (!value) {
+		return "";
+	}
+	var normalized = String(value).replace(/\/+$/, "");
+	// Some sessions inject /Client/X-salt=...-X in script base paths; remove that segment.
+	normalized = normalized.replace(/(\/Client)\/X-salt=[^/]+(?=\/|$)/i, "$1");
+	return normalized;
 }
 
 function pushUnique(arr, value) {
