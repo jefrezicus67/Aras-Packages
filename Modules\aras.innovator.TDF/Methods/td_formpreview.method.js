@@ -778,25 +778,24 @@ function buildLinkEditorCandidates() {
 		if (!root) {
 			continue;
 		}
-		// Primary route (matches working direct browser URL in R25/R32)
-		pushUnique(out, root + "/Modules/aras.innovator.TDF/LinkEditorDialog");
-		// Same route with explicit view-only mode.
+		// Prefer strict view-only routes so toolbar/search are not rendered.
 		pushUnique(out, root + "/Modules/aras.innovator.TDF/LinkEditorDialog?viewonly=1");
-		// Legacy fallback (some environments resolve without /Client prefix)
-		pushUnique(
-			out,
-			root.replace(/\/Client(?=\/|$)/i, "") +
-				"/Modules/aras.innovator.TDF/LinkEditorDialog"
-		);
 		pushUnique(
 			out,
 			root.replace(/\/Client(?=\/|$)/i, "") +
 				"/Modules/aras.innovator.TDF/LinkEditorDialog?viewonly=1"
 		);
-		// Last-resort fallback for environments exposing direct view files
 		pushUnique(
 			out,
 			root + "/Modules/aras.innovator.TDF/LinkEditorDialog.cshtml?viewonly=1"
+		);
+		// Non-viewonly routes are last-resort fallbacks only.
+		pushUnique(out, root + "/Modules/aras.innovator.TDF/LinkEditorDialog");
+		// Legacy fallback (some environments resolve without /Client prefix)
+		pushUnique(
+			out,
+			root.replace(/\/Client(?=\/|$)/i, "") +
+				"/Modules/aras.innovator.TDF/LinkEditorDialog"
 		);
 	}
 
@@ -839,9 +838,17 @@ function waitForDialogReady(iframe, onReady, onFailed) {
 				doc &&
 				(doc.getElementById("borderContainer") || doc.getElementById("techDocTree"))
 			);
+			var hasEditOnlyUi = !!(
+				doc &&
+				(doc.getElementById("toolbarContainer") || doc.getElementById("searchBox"))
+			);
 			var isReady = !!(doc && doc.readyState === "complete");
 
 			// In older clients, controller may initialize slightly after onload.
+			if (hasEditOnlyUi && isReady) {
+				onFailed();
+				return;
+			}
 			if (hasController || (hasDialogDom && isReady && tries > 5)) {
 				onReady();
 				return;
