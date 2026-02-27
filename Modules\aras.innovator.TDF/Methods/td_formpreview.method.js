@@ -778,9 +778,16 @@ function buildLinkEditorCandidates() {
 		if (!root) {
 			continue;
 		}
-		// R25/R32 preferred route (matches normal LinkEditor request pattern)
+		// R25-first: route without query string.
+		pushUnique(out, root + "/Modules/aras.innovator.TDF/LinkEditorDialog");
+		// Then try same route in explicit view-only mode.
 		pushUnique(out, root + "/Modules/aras.innovator.TDF/LinkEditorDialog?viewonly=1");
 		// Legacy fallback (some environments resolve without /Client prefix)
+		pushUnique(
+			out,
+			root.replace(/\/Client(?=\/|$)/i, "") +
+				"/Modules/aras.innovator.TDF/LinkEditorDialog"
+		);
 		pushUnique(
 			out,
 			root.replace(/\/Client(?=\/|$)/i, "") +
