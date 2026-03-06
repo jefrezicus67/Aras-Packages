@@ -1,102 +1,146 @@
-
-			IDisposable elevatedPermissionsScope = null;
+//Optimizations via Claude on Community Edition 2025 to try to get faster loading and shorten multi-loads for Edit & Done commands.
+IDisposable elevatedPermissionsScope = null;
 			String techDocPriveledgedPublisherId = "86F8574A13814269A1CEC0E012AEADB2";
 			String identityList = CCO.Permissions.IdentitiesList;
 
 			if (identityList.IndexOf(techDocPriveledgedPublisherId, System.StringComparison.Ordinal) != -1)
 			{
-				//Aras.Server.Security.Identity identity = Aras.Server.Security.Identity.GetByName("Super User");
-				//elevatedPermissionsScope = CCO.Permissions.GrantIdentity(identity);
-				elevatedPermissionsScope = CCO.Permissions.GrantIdentity(_superUserIdentity.Value); //NEW
+				elevatedPermissionsScope = CCO.Permissions.GrantIdentity(_superUserIdentity.Value);
 			}
 
 			try
 			{
+				// === DEDUP CACHE: prevent duplicate tp_DocumentGet calls within rapid transitions ===
+				string cacheDocId = this.getID();
+				string cacheLang = this.getAttribute("language",
+					this.getInnovator().getI18NSessionContext().GetDefaultLanguageCode());
+				string cacheByRef = this.getAttribute("by-reference", "internal");
+				string cacheLockState = this.getProperty("locked_by_id", "");
+				string cacheKey = cacheDocId + "|" + cacheLang + "|" + cacheByRef + "|" + cacheLockState;
+
+				var dedup = GetDedupCache();
+				if (dedup.TryGetValue(cacheKey, out var cachedResult)
+					&& (DateTime.UtcNow - cachedResult.Item2).TotalSeconds < 5)
+				{
+					return this.getInnovator().newResult(cachedResult.Item1);
+				}
+				// === END DEDUP CHECK ===
+
 				// Method is used for SchemaElementsFactory instantiation because it should use the same builder method that is currently active
 				RequestState["contentBuilderMethod"] = this.getAction();
 				// recursionsCount stores number of content builder method calls in context of same request
 				// it should be tracked in order to avoid recursive calls from dynamic content generators
 				RequestState["recursionsCount"] = (RequestState.Contains("recursionsCount") ? (int)RequestState["recursionsCount"] : 0) + 1;
 
-				//Item itemTypeSettings = GetItemTypeConfig(this.getInnovator(), this.getType());
-				Item itemTypeSettings = GetItemTypeConfigFast(this.getInnovator(), this.getType()); //NEW
+				Item itemTypeSettings = GetItemTypeConfigFast(this.getInnovator(), this.getType());
 
-				// Ensure per-request caches are created //NEW
-				_typeCfgCache.Value = GetTypeCfgCache(); //NEW
-				_latestVersionCache.Value = GetLatestVersionCache(); //NEW
+				// Ensure per-request caches are created
+				_typeCfgCache.Value = GetTypeCfgCache();
+				_latestVersionCache.Value = GetLatestVersionCache();
 
-				return Execute(this, RequestState, itemTypeSettings);
+				Item result = Execute(this, RequestState, itemTypeSettings);
+
+				// === CACHE THE RESULT if successful ===
+				if (!result.isError())
+				{
+					dedup[cacheKey] = Tuple.Create(result.getResult(), DateTime.UtcNow);
+				}
+				// === END CACHE STORE ===
+
+				return result;
 			}
 			finally
 			{
 				elevatedPermissionsScope?.Dispose();
 
-				  // Clear per-request caches to avoid accidental leakage across requests //NEW
-					_typeCfgCache.Value = null; //NEW
-					_latestVersionCache.Value = null; //NEW
+				// Clear per-request caches to avoid accidental leakage across requests
+				_typeCfgCache.Value = null;
+				_latestVersionCache.Value = null;
 			}
 		}
 
-		//NEW: Per-request caches (AsyncLocal so concurrent requests don't collide)
-		private static readonly System.Threading.AsyncLocal<Dictionary<string, Item>> _typeCfgCache = new System.Threading.AsyncLocal<Dictionary<string, Item>>(); //NEW
-		private static readonly System.Threading.AsyncLocal<Dictionary<string, string>> _latestVersionCache = new System.Threading.AsyncLocal<Dictionary<string, string>>(); //NEW
+		// === DEDUP CACHE: Static concurrent dictionary with 5-second TTL ===
+		// Uses ConcurrentDictionary for thread safety across concurrent requests.
+		// Cache key includes locked_by_id so that lock state changes (Edit/Done) 
+		// always trigger a fresh rebuild, while duplicate calls within the same
+		// transition are served from cache.
+		private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Tuple<string, DateTime>>
+			_dedupCache = new System.Collections.Concurrent.ConcurrentDictionary<string, Tuple<string, DateTime>>();
 
-		//NEW: Cache for Super User identity lookup across process lifetime (lazy)
-		private static readonly Lazy<Aras.Server.Security.Identity> _superUserIdentity = //NEW
-				new Lazy<Aras.Server.Security.Identity>(() => Aras.Server.Security.Identity.GetByName("Super User")); //NEW
+		private static System.Collections.Concurrent.ConcurrentDictionary<string, Tuple<string, DateTime>> GetDedupCache()
+		{
+			// Lazy cleanup: remove entries older than 30 seconds to prevent unbounded growth
+			var now = DateTime.UtcNow;
+			foreach (var kvp in _dedupCache)
+			{
+				if ((now - kvp.Value.Item2).TotalSeconds > 30)
+				{
+					_dedupCache.TryRemove(kvp.Key, out _);
+				}
+			}
+			return _dedupCache;
+		}
+		// === END DEDUP CACHE ===
 
-		//NEW: Safe getters for the current request's caches
-		private static Dictionary<string, Item> GetTypeCfgCache() //NEW
-				=> _typeCfgCache.Value ?? (_typeCfgCache.Value = new Dictionary<string, Item>(StringComparer.Ordinal)); //NEW
+		// Per-request caches (AsyncLocal so concurrent requests don't collide)
+		private static readonly System.Threading.AsyncLocal<Dictionary<string, Item>> _typeCfgCache = new System.Threading.AsyncLocal<Dictionary<string, Item>>();
+		private static readonly System.Threading.AsyncLocal<Dictionary<string, string>> _latestVersionCache = new System.Threading.AsyncLocal<Dictionary<string, string>>();
 
-		private static Dictionary<string, string> GetLatestVersionCache() //NEW
-				=> _latestVersionCache.Value ?? (_latestVersionCache.Value = new Dictionary<string, string>(StringComparer.Ordinal)); //NEW
+		// Cache for Super User identity lookup across process lifetime (lazy)
+		private static readonly Lazy<Aras.Server.Security.Identity> _superUserIdentity =
+				new Lazy<Aras.Server.Security.Identity>(() => Aras.Server.Security.Identity.GetByName("Super User"));
 
-		//NEW: Cached ItemType settings
-		private static Item GetItemTypeConfigFast(Innovator inn, string type) //NEW
-		{ //NEW
-			var cache = GetTypeCfgCache(); //NEW
-			if (!cache.TryGetValue(type, out var cfg)) //NEW
-			{ //NEW
-				// cfg = GetItemTypeConfig(inn, type); // original helper (keep for reference) //NEW
-				var req = inn.newItem(type, "tdf_GetItemTypeSettings"); //NEW
-				cfg = req.apply(); //NEW
-				cache[type] = cfg; //NEW
-			} //NEW
-			return cfg; //NEW
-		} //NEW
+		// Safe getters for the current request's caches
+		private static Dictionary<string, Item> GetTypeCfgCache()
+				=> _typeCfgCache.Value ?? (_typeCfgCache.Value = new Dictionary<string, Item>(StringComparer.Ordinal));
 
-		//NEW: Cached latest-version resolution (returns empty string if current or error)
-		private static string TryGetLatestVersionIdCached(Item anyItem) //NEW
-		{ //NEW
-			if (anyItem == null) return string.Empty; //NEW
+		private static Dictionary<string, string> GetLatestVersionCache()
+				=> _latestVersionCache.Value ?? (_latestVersionCache.Value = new Dictionary<string, string>(StringComparer.Ordinal));
 
-			// If current, no need to look anything up //NEW
-			var isCurrent = anyItem.getProperty("is_current"); //NEW
-			if (isCurrent != "0") return string.Empty; //NEW
+		// Cached ItemType settings
+		private static Item GetItemTypeConfigFast(Innovator inn, string type)
+		{
+			var cache = GetTypeCfgCache();
+			if (!cache.TryGetValue(type, out var cfg))
+			{
+				var req = inn.newItem(type, "tdf_GetItemTypeSettings");
+				cfg = req.apply();
+				cache[type] = cfg;
+			}
+			return cfg;
+		}
 
-			var type = anyItem.getType(); //NEW
-			var id = anyItem.getID(); //NEW
-			if (string.IsNullOrEmpty(type) || string.IsNullOrEmpty(id)) return string.Empty; //NEW
+		// Cached latest-version resolution (returns empty string if current or error)
+		private static string TryGetLatestVersionIdCached(Item anyItem)
+		{
+			if (anyItem == null) return string.Empty;
 
-			var key = type + ":" + id; //NEW
-			var cache = GetLatestVersionCache(); //NEW
-			if (cache.TryGetValue(key, out var cached)) return cached; //NEW
+			// If current, no need to look anything up
+			var isCurrent = anyItem.getProperty("is_current");
+			if (isCurrent != "0") return string.Empty;
 
-			// Fallback: single call with caching //NEW
-			var latestItemVersion = anyItem.newItem(type, "getItemLastVersion"); //NEW
-			latestItemVersion.setID(id); //NEW
-			latestItemVersion = latestItemVersion.apply(); //NEW
-			if (!latestItemVersion.isError()) //NEW
-			{ //NEW
-				var latestId = latestItemVersion.getID(); //NEW
-				cache[key] = latestId ?? string.Empty; //NEW
-				return latestId ?? string.Empty; //NEW
-			} //NEW
+			var type = anyItem.getType();
+			var id = anyItem.getID();
+			if (string.IsNullOrEmpty(type) || string.IsNullOrEmpty(id)) return string.Empty;
 
-			cache[key] = string.Empty; //NEW
-			return string.Empty; //NEW
-		} //NEW
+			var key = type + ":" + id;
+			var cache = GetLatestVersionCache();
+			if (cache.TryGetValue(key, out var cached)) return cached;
+
+			// Fallback: single call with caching
+			var latestItemVersion = anyItem.newItem(type, "getItemLastVersion");
+			latestItemVersion.setID(id);
+			latestItemVersion = latestItemVersion.apply();
+			if (!latestItemVersion.isError())
+			{
+				var latestId = latestItemVersion.getID();
+				cache[key] = latestId ?? string.Empty;
+				return latestId ?? string.Empty;
+			}
+
+			cache[key] = string.Empty;
+			return string.Empty;
+		}
 
 
 		internal static Item Execute(Item targetDocument, Aras.Server.Core.IContextState requestState, Item itemTypeSettings)
@@ -279,8 +323,7 @@
 		}
 
 		internal static List<string> GetDocumentTypes(Innovator innovator, string type) {
-			//var itemTypeConfig = GetItemTypeConfig(innovator, type);
-			var itemTypeConfig = GetItemTypeConfigFast(innovator, type); //NEW
+			var itemTypeConfig = GetItemTypeConfigFast(innovator, type);
 			var types = new List<string>(){type};
 			var externalType = itemTypeConfig.getProperty("datamodel.relationships.documentReferenceRelatedType", type);
 
@@ -288,8 +331,7 @@
 			{
 				types.Add(externalType);
 
-				//itemTypeConfig = GetItemTypeConfig(innovator, externalType);
-				itemTypeConfig = GetItemTypeConfigFast(innovator, externalType); //NEW
+				itemTypeConfig = GetItemTypeConfigFast(innovator, externalType);
 				externalType = itemTypeConfig.getProperty("datamodel.relationships.documentReferenceRelatedType", type);
 			}
 
@@ -419,7 +461,7 @@
 
 				XmlDocument documentContent = innovatorInstance.newItem().dom;
 				documentContent.XmlResolver = null;
-				documentContent.PreserveWhitespace = false; //NEW
+				documentContent.PreserveWhitespace = false;
 				documentContent.LoadXml(contentString.ToString());
 				List<XmlNode> nodeList = SearchDynamicElements(dynamicElementNames, documentContent.DocumentElement, new List<XmlNode>());
 
@@ -464,16 +506,7 @@
 
 					if (isCurrent == "0")
 					{
-						//Item latestItemVersion = imageItem.newItem(imageItem.getType(), "getItemLastVersion");
-						//latestItemVersion.setID(imageItem.getID());
-						//latestItemVersion = latestItemVersion.apply();
-
-						//if (!latestItemVersion.isError())
-						//{
-						//	latestVersionId = latestItemVersion.getID();
-						//}
-
-						latestVersionId = TryGetLatestVersionIdCached(imageItem); //NEW
+						latestVersionId = TryGetLatestVersionIdCached(imageItem);
 					}
 
 					referenceProperties.Add("isCurrent", imageItem.getProperty("is_current"));
@@ -555,16 +588,7 @@
 
 					if (isCurrent == "0")
 					{
-						//Item latestItemVersion = itemItem.newItem(itemItem.getType(), "getItemLastVersion");
-						//latestItemVersion.setID(itemItem.getID());
-						//latestItemVersion = latestItemVersion.apply();
-
-						//if (!latestItemVersion.isError())
-						//{
-						//	latestVersionId = latestItemVersion.getID();
-						//}
-
-						latestVersionId = TryGetLatestVersionIdCached(itemItem); //NEW
+						latestVersionId = TryGetLatestVersionIdCached(itemItem);
 					}
 
 					referenceProperties.Add("isCurrent", itemItem.getProperty("is_current"));
@@ -674,16 +698,7 @@
 
 							if (isCurrent == "0")
 							{
-								//Item latestBlockVersion = blockItem.newItem(blockItem.getType(), "getItemLastVersion");
-								//latestBlockVersion.setID(blockId);
-								//latestBlockVersion = latestBlockVersion.apply();
-
-								//if (!latestBlockVersion.isError())
-								//{
-								//	latestVersionId = latestBlockVersion.getID();
-								//}
-
-								latestVersionId = TryGetLatestVersionIdCached(blockItem); //NEW
+								latestVersionId = TryGetLatestVersionIdCached(blockItem);
 							}
 
 							referenceProperties.Add("majorVersion", blockItem.getProperty("major_rev"));
@@ -767,5 +782,3 @@
 
 			var executionContext = new Aras.TDF.Base.SchemaElementExecutionContext(thisItem.getID(), thisItem.getType(), contentBuilderMethod);
 			return new Aras.TDF.Base.SchemaElementFactory(innovatorInstance, schemaId, executionContext);
-			
-		
