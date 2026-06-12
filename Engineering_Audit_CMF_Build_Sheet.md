@@ -6,11 +6,14 @@ engineering discipline is a populated **seed document**, not a separate configur
 Decision baseline: *same structure across disciplines, questions differ only.* → one Content
 Type, one schema, seed-and-copy for templates.
 
-> **Correction note (v2):** CMF has **no "List" data type**. Property data types are
-> String, Text, Integer, Date, Boolean, Image. Dropdowns for `status`/`stage` are a **View-layer**
-> concern, not a property attribute — see §2.3 and the note under it. Also corrected: the
-> document is the **CMF ItemType** (not a plain Business Object ItemType), the OnFormPopulated
-> method is **`cmf_ShowContentType`**, and the binding parameters are spelled out in §2.4.
+> **Correction note (v3):** CMF has **no "List" data type** — confirmed against the live QMS
+> Design FMEA. Property data types are String, Text, Integer, Date, Boolean, Image. Dropdowns are
+> a **View column** setting, not a property attribute: `cmf_TabularViewColumn.classification` =
+> `Unbound Combo` (inline values, no list) or `Bound List` (sourced from a list, two-column
+> label/value editor). The FMEA stores severity as plain `integer` and gets its 1–10 dropdown
+> purely from the column classification. So `status`/`stage` are **String** + **Unbound Combo** —
+> no helper ItemType, no code. Also corrected: the document is the **CMF ItemType**, the
+> OnFormPopulated method is **`cmf_ShowContentType`**, binding params are in §2.4.
 
 ---
 
@@ -29,7 +32,7 @@ CMF separates two ItemTypes. Get this right or nothing renders:
 | 0.1 | Create ItemType `eng_AuditDocument` | TOC access, permissions, Can Add identity, `name` property (String, 32–64). No special CMF config on the ItemType itself. |
 | 0.2 | On its Form: Form Event tab → Add Methods → `cmf_ShowContentType`, set Event = **OnFormPopulated** | Required for every CMF ItemType form. This is the core method, not custom code. |
 | 0.3 | Create a RelationshipType (e.g. `eng_AuditDocumentRel`), Source ItemType = `eng_AuditDocument` | CMF needs this. (CMF also auto-creates 2 hidden RelationshipTypes later — do **not** export those.) |
-| 0.4 | Create the helper Itemtypes for picklists (if using the binding route — see §2.3) | `eng_AuditStatus` (4 instances), `eng_MilestoneStage` (4 instances) |
+| 0.4 | *(Optional)* Create a maintained List for status/stage values | Only needed if you choose **Bound List** (governed values). For **Unbound Combo**, values are typed inline on the column — skip this. |
 
 ### Container metadata (regular properties on `eng_AuditDocument`)
 
@@ -66,7 +69,7 @@ CMF property data types: **String, Text, Integer, Date, Boolean, Image.** (No Li
 
 | Property | Data Type | Required | List / Notes |
 |----------|-----------|----------|--------------|
-| `stage` | String | Yes | Constrain to the 4 stages at the View (see §2.3) |
+| `stage` | String | Yes | Dropdown via column `classification` = Unbound Combo (see §2.3) |
 | `milestone_label` | String (128) | No | Optional free-text descriptor |
 
 ### 2.2 `Scope` — child of Milestone
@@ -85,16 +88,18 @@ CMF property data types: **String, Text, Integer, Date, Boolean, Image.** (No Li
 | `guidance` | Text | No | Acceptance criteria / reviewer guidance |
 | `ref_text` | Text | No | References as free text |
 | `ref_document` | (binding) | No | References as a live document link — element binding, not a property (see §2.4) |
-| `status` | String | Yes | Constrain to the 4 statuses at the View (see below) |
+| `status` | String | Yes | Dropdown via column `classification` = Unbound Combo (see below) |
 | `reviewer_comment` | Text | No | Quick inline note; formal observation = child Finding |
 
-> **How `status` / `stage` get a dropdown** — value stored as String; the picklist is a View
-> decision, two options:
-> 1. **String + View column combo editor** (cleanest, inline) — *verify your Tabular View Column
->    config exposes a value-list/combo editor; the base guide documents Mapped Property / Header /
->    Width but not a values field, so confirm in your build or copy the DQD/PQD pattern.*
-> 2. **Element binding to a helper ItemType** (`eng_AuditStatus` / `eng_MilestoneStage`), New
->    Element Mode = **Pick Only** (fully documented, no code; makes the value a bound child element).
+> **How `status` / `stage` get a dropdown** (confirmed from the live QMS Design FMEA) — the value
+> is stored as a plain **String/Integer**; the dropdown is set on the **Tabular View column** via
+> its `classification`:
+> - **Property Default** — plain cell (no dropdown)
+> - **Unbound Combo** — dropdown of inline values, no external list. *Use this for `status` and
+>   `stage`*: type the 4 values on the column. No helper ItemType, no method, no code.
+> - **Bound List** — dropdown sourced from a maintained list, rendered as a two-column
+>   label/value editor (how FMEA does its 1–10 severity/occurrence/detection ranks). Use only if
+>   you want status/stage values centrally governed and reusable.
 
 ### 2.4 `Finding` — child of Question — **bound to the QMS Audit Finding**
 
@@ -140,7 +145,9 @@ eng_AuditDocument (CMF ItemType / Linked ItemType — the document)
 ## 4. View configuration
 
 - Right-click **Views → Add View** → confirm **Tabular** view.
-- **Columns:** Add Column per visible property — Mapped Property, Header Title, Initial Width.
+- **Columns:** Add Column per visible property — Mapped Property, Header Title, Initial Width, and
+  set **`classification`** for the cell editor: `Property Default` for plain cells, `Unbound Combo`
+  for `status`/`stage` dropdowns, `Bound List` if sourcing from a maintained list.
 - **Element Nodes:** Add Element Type Configuration per element (Label, Element Type, Icon).
 - **Additional Header Rows:** optional grouping bands (Label, Start col, End col).
 - **Status color-coding** (the "intuitive" requirement): apply cell styles on `status` —
@@ -167,8 +174,8 @@ eng_AuditDocument (CMF ItemType / Linked ItemType — the document)
 
 ## 6. Confirm before binding (open items)
 
-- **Dropdown mechanism:** does your Tabular View Column config expose a value-list editor (→ String
-  route), or do you go the helper-ItemType binding route? (Copy DQD/PQD to settle this.)
+- ~~**Dropdown mechanism**~~ — **resolved:** String property + column `classification` =
+  Unbound Combo (inline) or Bound List (governed). Confirmed against the QMS Design FMEA.
 - **Action ItemType:** exact QMS object the `Action` element binds to (CAP action vs. task).
 - **`ref_document` target:** native Document, `tp_TechDoc`, or both.
 - **Question numbering:** manual string vs. auto-sequence in the Name method.
